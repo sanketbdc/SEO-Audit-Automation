@@ -2,31 +2,109 @@ name: SEO Audit
 
 on:
   schedule:
-    - cron: "0 20 7 5 *"   # May 8 at 2:00 AM IST (UTC+5:30 = UTC 20:30 prev day)
+    - cron: "0 20 7 5 *"   # May 8 at 2:00 AM IST (UTC 20:30 on May 7)
   workflow_dispatch:         # allows manual trigger from GitHub UI
 
 jobs:
-  audit:
+
+  audit-bharat-connect:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-
+    timeout-minutes: 360
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
         with:
           node-version: "18"
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Install Playwright browsers
-        run: npx playwright install chromium --with-deps
-
-      - name: Run SEO Audit
+      - run: npm install
+      - run: npx playwright install chromium --with-deps
+      - name: Run SEO Audit - bharat-connect.com
         env:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          AUDIT_SITE: "https://www.bharat-connect.com/"
+        run: node seo_audit.js
+
+  audit-shapoorji-pallonji:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: "18"
+      - run: npm install
+      - run: npx playwright install chromium --with-deps
+      - name: Run SEO Audit - shapoorjipallonji.com
+        env:
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          AUDIT_SITE: "https://www.shapoorjipallonji.com/"
+        run: node seo_audit.js
+
+  audit-shapoorji-realestate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: "18"
+      - run: npm install
+      - run: npx playwright install chromium --with-deps
+      - name: Run SEO Audit - shapoorjirealestate.com
+        env:
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          AUDIT_SITE: "https://shapoorjirealestate.com/"
+        run: node seo_audit.js
+
+  audit-joyville:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: "18"
+      - run: npm install
+      - run: npx playwright install chromium --with-deps
+      - name: Run SEO Audit - joyvillehomes.com
+        env:
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          AUDIT_SITE: "https://www.joyvillehomes.com/"
+        run: node seo_audit.js
+
+  audit-viceroy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: "18"
+      - run: npm install
+      - run: npx playwright install chromium --with-deps
+      - name: Run SEO Audit - viceroyproperties.in
+        env:
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          AUDIT_SITE: "https://www.viceroyproperties.in/"
+        run: node seo_audit.js
+
+  audit-bombaydc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: "18"
+      - run: npm install
+      - run: npx playwright install chromium --with-deps
+      - name: Run SEO Audit - bombaydc.com
+        env:
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          AUDIT_SITE: "https://bombaydc.com/"
         run: node seo_audit.js
