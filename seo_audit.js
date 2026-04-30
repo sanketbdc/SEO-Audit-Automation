@@ -33,13 +33,13 @@ const CONFIG = {
   // bypassHttpCheck: true  → use for Cloudflare/security protected sites (slower)
   // bypassHttpCheck: false → default, fast raw HTTP check
   websites: [
-    { url: "https://www.delhiredz.com/",             bypassHttpCheck: false },
-    // { url: "https://www.bharat-connect.com/",      bypassHttpCheck: true  },
-    // { url: "https://www.shapoorjipallonji.com/",   bypassHttpCheck: false },
-    // { url: "https://shapoorjirealestate.com/",     bypassHttpCheck: false },
-    // { url: "https://www.joyvillehomes.com/",       bypassHttpCheck: false },
-    // { url: "https://www.viceroyproperties.in/",   bypassHttpCheck: false },
-    // { url: "https://bombaydc.com/",               bypassHttpCheck: false },
+   
+     { url: "https://www.bharat-connect.com/",      bypassHttpCheck: true  },
+     { url: "https://www.shapoorjipallonji.com/",   bypassHttpCheck: false },
+     { url: "https://shapoorjirealestate.com/",     bypassHttpCheck: false },
+     { url: "https://www.joyvillehomes.com/",       bypassHttpCheck: false },
+     { url: "https://www.viceroyproperties.in/",   bypassHttpCheck: false },
+     { url: "https://bombaydc.com/",               bypassHttpCheck: false },
   ].filter(s => !process.env.AUDIT_SITE || s.url === process.env.AUDIT_SITE),
 
   // ── Output Excel file path ────────────────────────────────
