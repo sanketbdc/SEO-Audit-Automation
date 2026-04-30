@@ -34,12 +34,13 @@ const CONFIG = {
   // bypassHttpCheck: false → default, fast raw HTTP check
   websites: [
    
-     { url: "https://www.bharat-connect.com/",      bypassHttpCheck: true  },
+     
      { url: "https://www.shapoorjipallonji.com/",   bypassHttpCheck: false },
-     { url: "https://shapoorjirealestate.com/",     bypassHttpCheck: false },
-     { url: "https://www.joyvillehomes.com/",       bypassHttpCheck: false },
      { url: "https://www.viceroyproperties.in/",   bypassHttpCheck: false },
      { url: "https://bombaydc.com/",               bypassHttpCheck: false },
+     { url: "https://shapoorjirealestate.com/",     bypassHttpCheck: false },
+     { url: "https://www.joyvillehomes.com/",       bypassHttpCheck: false },
+     { url: "https://www.bharat-connect.com/",      bypassHttpCheck: true  },
   ].filter(s => !process.env.AUDIT_SITE || s.url === process.env.AUDIT_SITE),
 
   // ── Output Excel file path ────────────────────────────────
