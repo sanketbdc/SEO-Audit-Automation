@@ -1,0 +1,32 @@
+name: SEO Audit
+
+on:
+  schedule:
+    - cron: "0 20 7 5 *"   # May 8 at 2:00 AM IST (UTC+5:30 = UTC 20:30 prev day)
+  workflow_dispatch:         # allows manual trigger from GitHub UI
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: "18"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      - name: Run SEO Audit
+        env:
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+        run: node seo_audit.js
