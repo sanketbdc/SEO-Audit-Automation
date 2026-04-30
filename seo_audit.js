@@ -670,6 +670,9 @@ async function runAudit() {
   console.log("\n╔══════════════════════════════════════════╗");
   console.log("║        ALL AUDITS COMPLETE! 🎉           ║");
   console.log("╚══════════════════════════════════════════╝\n");
+
+  // On GitHub Actions (non-TTY) exit cleanly after all audits complete
+  if (!process.stdin.isTTY) process.exit(0);
 }
 
 async function sendCombinedEmail(attachments) {
