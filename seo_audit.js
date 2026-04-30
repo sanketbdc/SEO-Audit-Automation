@@ -33,12 +33,13 @@ const CONFIG = {
   // bypassHttpCheck: true  → use for Cloudflare/security protected sites (slower)
   // bypassHttpCheck: false → default, fast raw HTTP check
   websites: [
-    { url: "https://www.bharat-connect.com/", bypassHttpCheck: true  },
-    { url: "https://www.shapoorjipallonji.com/", bypassHttpCheck: false },
-    { url: "https://shapoorjirealestate.com/", bypassHttpCheck: false },
-    { url: "https://www.joyvillehomes.com/", bypassHttpCheck: false },
-    { url: "https://www.viceroyproperties.in/", bypassHttpCheck: false },
-    { url: "https://bombaydc.com/", bypassHttpCheck: false },
+    { url: "https://www.delhiredz.com/", bypassHttpCheck: false  },
+    // { url: "https://www.bharat-connect.com/", bypassHttpCheck: true  },
+    // { url: "https://www.shapoorjipallonji.com/", bypassHttpCheck: false },
+    // { url: "https://shapoorjirealestate.com/", bypassHttpCheck: false },
+    // { url: "https://www.joyvillehomes.com/", bypassHttpCheck: false },
+    // { url: "https://www.viceroyproperties.in/", bypassHttpCheck: false },
+    // { url: "https://bombaydc.com/", bypassHttpCheck: false },
   ],
 
   // ── Output Excel file path ────────────────────────────────
@@ -56,7 +57,7 @@ const CONFIG = {
     secure  : false,
     user    : process.env.EMAIL_USER,
     pass    : process.env.EMAIL_PASS,
-    to      : "sanket@bombaydc.com, mangesh@bombaydc.com",
+    to      : "sanket@bombaydc.com",
   },
 
   // ── Scheduler settings ────────────────────────────────────
