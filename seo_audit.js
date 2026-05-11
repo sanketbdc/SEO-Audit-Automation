@@ -34,8 +34,8 @@ const CONFIG = {
   // bypassHttpCheck: true  → use for Cloudflare/security protected sites (slower)
   // bypassHttpCheck: false → default, fast raw HTTP check
   websites: [
-    //  { url: "https://www.shapoorjipallonji.com/",   bypassHttpCheck: false },
-      { url: "https://www.viceroyproperties.in/",    bypassHttpCheck: false },
+      { url: "https://www.shapoorjipallonji.com/",   bypassHttpCheck: false },
+    //  { url: "https://www.viceroyproperties.in/",    bypassHttpCheck: false },
     //  { url: "https://bombaydc.com/",                bypassHttpCheck: false },
     //  { url: "https://shapoorjirealestate.com/",     bypassHttpCheck: false },
     //  { url: "https://www.joyvillehomes.com/",       bypassHttpCheck: false },
