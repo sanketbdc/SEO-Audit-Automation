@@ -34,8 +34,8 @@ const CONFIG = {
   // bypassHttpCheck: true  → use for Cloudflare/security protected sites (slower)
   // bypassHttpCheck: false → default, fast raw HTTP check
   websites: [
-     { url: "https://www.shapoorjipallonji.com/",   bypassHttpCheck: false },
-     { url: "https://www.viceroyproperties.in/",    bypassHttpCheck: false },
+      { url: "https://www.shapoorjipallonji.com/",   bypassHttpCheck: false },
+      { url: "https://www.viceroyproperties.in/",    bypassHttpCheck: false },
      { url: "https://bombaydc.com/",                bypassHttpCheck: false },
      { url: "https://shapoorjirealestate.com/",     bypassHttpCheck: false },
      { url: "https://www.joyvillehomes.com/",       bypassHttpCheck: false },
@@ -245,6 +245,61 @@ async function crawlAllUrls(startUrl, browser) {
 // ══════════════════════════════════════════════════════════════════════════════
 //  STEP 2 — SEO Details
 // ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Enhanced status check with redirect type detection
+ * Returns: { status, finalUrl, redirected, redirectType, originalUrl, headers }
+ */
+function getStatusAndFinalUrlWithRedirectType(inputUrl, returnHeaders = false) {
+  return new Promise((resolve) => {
+    const doRequest = (url, method, redirectCount, chain) => {
+      if (redirectCount > 10) return resolve({ status: -1, finalUrl: url, redirected: true, redirectType: "Limit exceeded", originalUrl: inputUrl, headers: {}, chain });
+      try {
+        const parsed = new URL(url);
+        const lib = parsed.protocol === "https:" ? https : http;
+        const req = lib.request(
+          { hostname: parsed.hostname, path: parsed.pathname + parsed.search,
+            method, headers: { "User-Agent": "Mozilla/5.0 (SEO-Audit-Bot/1.0)" },
+            timeout: 15000, rejectUnauthorized: false },
+          (res) => {
+            const status = res.statusCode;
+            const redirectCode = [301, 302, 303, 307, 308].includes(status) ? status : null;
+            
+            if (redirectCode && res.headers.location) {
+              const next = new URL(res.headers.location, url).href;
+              const redirectType = status === 301 ? "301 Moved Permanently" :
+                                  status === 302 ? "302 Found" :
+                                  status === 303 ? "303 See Other" :
+                                  status === 307 ? "307 Temporary Redirect" :
+                                  status === 308 ? "308 Permanent Redirect" : "Unknown";
+              const newChain = [...chain, { from: url, to: next, type: redirectType }];
+              return doRequest(next, method, redirectCount + 1, newChain);
+            }
+            if ((status === 403 || status === 405) && method === "HEAD") {
+              return doRequest(url, "GET", redirectCount);
+            }
+            
+            const redirectType = chain.length > 0 ? chain.map(c => c.type).join(" → ") : null;
+            resolve({
+              status,
+              finalUrl    : url,
+              redirected  : redirectCount > 0,
+              redirectType: redirectType,
+              originalUrl : inputUrl,
+              headers     : returnHeaders ? res.headers : {},
+              chain,
+            });
+          }
+        );
+        req.on("error", () => resolve({ status: -1, finalUrl: url, redirected: false, redirectType: null, originalUrl: inputUrl, headers: {}, chain }));
+        req.on("timeout", () => { req.destroy(); resolve({ status: -1, finalUrl: url, redirected: false, redirectType: null, originalUrl: inputUrl, headers: {}, chain }); });
+        req.end();
+      } catch { resolve({ status: -1, finalUrl: inputUrl, redirected: false, redirectType: null, originalUrl: inputUrl, headers: {}, chain }); }
+    };
+    doRequest(inputUrl, "HEAD", 0, []);
+  });
+}
+
 async function fetchSeoDetails(urls, browser, bypassHttpCheck = false) {
   const results = [];
   const context = await browser.newContext({
@@ -256,26 +311,71 @@ async function fetchSeoDetails(urls, browser, bypassHttpCheck = false) {
     const url = urls[i];
     process.stdout.write(`\r  [SEO] ${i + 1}/${urls.length}: ${url.slice(0, 70)}   `);
 
-    let status, finalUrl, redirected;
+    let status, finalUrl, redirected, redirectType;
 
     if (bypassHttpCheck) {
-      finalUrl   = url;
-      status     = 200;
-      redirected = false;
+      finalUrl      = url;
+      status        = 200;
+      redirected    = false;
+      redirectType  = null;
     } else {
-      ({ status, finalUrl, redirected } = await getStatusAndFinalUrl(url));
+      ({ status, finalUrl, redirected, redirectType } = await getStatusAndFinalUrlWithRedirectType(url));
       if (status !== 200) {
-        results.push({ url, finalUrl, status, redirected });
+        results.push({ seedUrl: url, isRedirected: redirected ? "Yes" : "No", redirectType: redirectType || "", finalUrl, finalStatus: status, ga4Present: "Not Checked" });
         continue;
       }
     }
 
     const page = await context.newPage();
-    const row  = { url, finalUrl, status, redirected };
+    const row  = { seedUrl: url, isRedirected: redirected ? "Yes" : "No", redirectType: redirectType || "", finalUrl, finalStatus: status };
 
     try {
       const res  = await page.goto(finalUrl, { timeout: 30000, waitUntil: bypassHttpCheck ? "networkidle" : "domcontentloaded" });
-      if (bypassHttpCheck) { await page.waitForTimeout(2000); row.status = res?.status() ?? -1; }
+      if (bypassHttpCheck) { await page.waitForTimeout(2000); row.finalStatus = res?.status() ?? -1; }
+
+      // ── GA4 Detection ─────────────────────────────────────────────────────
+      const ga4Data = await page.evaluate(() => {
+        let ga4PropertyId = null;
+        let ga4MeasurementId = null;
+        
+        // Check for GA4 via window.gtag.config
+        if (window.gtag) {
+          try {
+            // Try to extract GA4 IDs from window.dataLayer
+            if (window.dataLayer && Array.isArray(window.dataLayer)) {
+              for (const event of window.dataLayer) {
+                if (event['measurement_id']) ga4MeasurementId = event['measurement_id'];
+                if (event['config']) {
+                  Object.keys(event.config).forEach(key => {
+                    if (key.startsWith('G-')) ga4MeasurementId = key;
+                  });
+                }
+              }
+            }
+          } catch (e) { }
+        }
+        
+        // Check script tags for GA4
+        const scripts = Array.from(document.querySelectorAll('script')).map(s => s.innerHTML || s.src);
+        for (const script of scripts) {
+          const match = script.match(/G-[A-Z0-9]{8,10}/);
+          if (match) ga4MeasurementId = match[0];
+        }
+        
+        // Check meta tags
+        const meta = document.querySelector('meta[property="google-analytics"]');
+        if (meta) ga4PropertyId = meta.getAttribute('content');
+        
+        return {
+          isPresent: !!(ga4MeasurementId || scripts.some(s => s.includes('gtag'))),
+          measurementId: ga4MeasurementId || "Not Found",
+          propertyId: ga4PropertyId || "Not Found",
+        };
+      });
+
+      row.ga4Present = ga4Data.isPresent ? "Yes" : "No";
+      row.ga4MeasurementId = ga4Data.measurementId;
+      row.ga4PropertyId = ga4Data.propertyId;
 
       row.metaTitle    = await page.$eval("head > title", el => el.innerText.trim()).catch(() => "Not Found");
       row.metaTitleLen = row.metaTitle !== "Not Found" ? row.metaTitle.length : 0;
@@ -309,6 +409,9 @@ async function fetchSeoDetails(urls, browser, bypassHttpCheck = false) {
 
     } catch (e) {
       row.error = e.message;
+      row.ga4Present = "Error";
+      row.ga4MeasurementId = "";
+      row.ga4PropertyId = "";
     } finally {
       await page.close();
     }
@@ -911,34 +1014,47 @@ async function buildExcel(siteName, crawlData, seoData, altData, linkData, aiDat
   // ── Sheet 2: SEO Data ─────────────────────────────────────────────────────
   const ws2 = wb.addWorksheet("Sheet2 - SEO Data");
   ws2.columns = [
-    { header: "Input URL",       key: "url",          width: 55 },
-    { header: "Final URL",       key: "finalUrl",     width: 55 },
-    { header: "Status Code",     key: "status",       width: 13 },
-    { header: "Redirected?",     key: "redirected",   width: 13 },
-    { header: "Meta Title",      key: "metaTitle",    width: 50 },
-    { header: "Title Length",    key: "metaTitleLen", width: 13 },
-    { header: "Meta Description",key: "metaDesc",     width: 60 },
-    { header: "Desc Length",     key: "metaDescLen",  width: 12 },
-    { header: "Canonical",       key: "canonical",    width: 55 },
-    { header: "H1 Tag(s)",       key: "h1",           width: 50 },
-    { header: "H1 Count",        key: "h1Count",      width: 10 },
-    { header: "H2 Tags",         key: "h2",           width: 50 },
-    { header: "H2 Count",        key: "h2Count",      width: 10 },
-    { header: "OG Title",        key: "ogTitle",      width: 40 },
-    { header: "OG Description",  key: "ogDescription",width: 50 },
-    { header: "OG Image",        key: "ogImage",      width: 55 },
-    { header: "OG URL",          key: "ogUrl",        width: 55 },
-    { header: "Twitter Card",    key: "twitterCard",  width: 20 },
-    { header: "Twitter Title",   key: "twitterTitle", width: 40 },
-    { header: "Twitter Desc",    key: "twitterDesc",  width: 50 },
-    { header: "Robots Meta",     key: "robotsMeta",   width: 25 },
-    { header: "Schema",          key: "schema",       width: 40 },
+    // ── Redirect tracking ──
+    { header: "Seed URL",            key: "seedUrl",          width: 55 },
+    { header: "Is Redirected?",      key: "isRedirected",     width: 15 },
+    { header: "Redirect Type",       key: "redirectType",     width: 25 },
+    { header: "Final URL",           key: "finalUrl",         width: 55 },
+    { header: "Final Status Code",   key: "finalStatus",      width: 16 },
+    // ── GA4 Analytics ──
+    { header: "GA4 Present?",        key: "ga4Present",       width: 14 },
+    { header: "GA4 Measurement ID",  key: "ga4MeasurementId", width: 25 },
+    { header: "GA4 Property ID",     key: "ga4PropertyId",    width: 25 },
+    // ── SEO metadata ──
+    { header: "Meta Title",          key: "metaTitle",        width: 50 },
+    { header: "Title Length",        key: "metaTitleLen",     width: 13 },
+    { header: "Meta Description",    key: "metaDesc",         width: 60 },
+    { header: "Desc Length",         key: "metaDescLen",      width: 12 },
+    { header: "Canonical",           key: "canonical",        width: 55 },
+    { header: "H1 Tag(s)",           key: "h1",               width: 50 },
+    { header: "H1 Count",            key: "h1Count",          width: 10 },
+    { header: "H2 Tags",             key: "h2",               width: 50 },
+    { header: "H2 Count",            key: "h2Count",          width: 10 },
+    { header: "OG Title",            key: "ogTitle",          width: 40 },
+    { header: "OG Description",      key: "ogDescription",    width: 50 },
+    { header: "OG Image",            key: "ogImage",          width: 55 },
+    { header: "OG URL",              key: "ogUrl",            width: 55 },
+    { header: "Twitter Card",        key: "twitterCard",      width: 20 },
+    { header: "Twitter Title",       key: "twitterTitle",     width: 40 },
+    { header: "Twitter Desc",        key: "twitterDesc",      width: 50 },
+    { header: "Robots Meta",         key: "robotsMeta",       width: 25 },
+    { header: "Schema",              key: "schema",           width: 40 },
   ];
   styleHeader(ws2.getRow(1), "FF1F4E79");
   seoData.forEach((d, i) => {
     const r = ws2.addRow({
-      url: d.url, finalUrl: d.finalUrl ?? d.url, status: d.status,
-      redirected: d.redirected ? "Yes" : "No",
+      seedUrl: d.seedUrl ?? d.url ?? "",
+      isRedirected: d.isRedirected ?? "Unknown",
+      redirectType: d.redirectType ?? "",
+      finalUrl: d.finalUrl ?? d.seedUrl ?? d.url ?? "",
+      finalStatus: d.finalStatus ?? d.status ?? "",
+      ga4Present: d.ga4Present ?? "Not Checked",
+      ga4MeasurementId: d.ga4MeasurementId ?? "",
+      ga4PropertyId: d.ga4PropertyId ?? "",
       metaTitle: d.metaTitle ?? "", metaTitleLen: d.metaTitleLen ?? "",
       metaDesc: d.metaDesc ?? "", metaDescLen: d.metaDescLen ?? "",
       canonical: d.canonical ?? "", h1: d.h1 ?? "", h1Count: d.h1Count ?? "",
@@ -950,8 +1066,40 @@ async function buildExcel(siteName, crawlData, seoData, altData, linkData, aiDat
       schema: d.schema ?? "",
     });
     styleDataRow(r, i);
-    makeHyperlink(r.getCell("url"), d.url);
-    if (d.finalUrl && d.finalUrl !== d.url) makeHyperlink(r.getCell("finalUrl"), d.finalUrl);
+    makeHyperlink(r.getCell("seedUrl"), d.seedUrl ?? d.url ?? "");
+    if (d.finalUrl && d.finalUrl !== (d.seedUrl ?? d.url)) makeHyperlink(r.getCell("finalUrl"), d.finalUrl);
+    
+    // Colour-code redirect status
+    const redirectCell = r.getCell("isRedirected");
+    if (d.isRedirected === "Yes") {
+      redirectCell.font = { name: "Arial", size: 10, bold: true, color: { argb: "FF9C6500" } };
+    }
+    
+    // Colour-code redirect type
+    if (d.redirectType && d.redirectType.includes("301")) {
+      r.getCell("redirectType").font = { name: "Arial", size: 10, color: { argb: "FF1E7145" }, bold: true };
+    } else if (d.redirectType && d.redirectType.includes("302")) {
+      r.getCell("redirectType").font = { name: "Arial", size: 10, color: { argb: "FF9C6500" }, bold: true };
+    }
+    
+    // Colour-code final status
+    const statusCell = r.getCell("finalStatus");
+    if (d.finalStatus === 200) {
+      statusCell.font = { name: "Arial", size: 10, color: { argb: "FF1E7145" }, bold: true };
+    } else if ([301, 302, 303, 307, 308].includes(d.finalStatus)) {
+      statusCell.font = { name: "Arial", size: 10, color: { argb: "FF9C6500" }, bold: true };
+    } else if (d.finalStatus >= 400) {
+      statusCell.font = { name: "Arial", size: 10, color: { argb: "FF9C0006" }, bold: true };
+    }
+    
+    // Colour-code GA4 status
+    const ga4Cell = r.getCell("ga4Present");
+    if (d.ga4Present === "Yes") {
+      ga4Cell.font = { name: "Arial", size: 10, color: { argb: "FF1E7145" }, bold: true };
+    } else if (d.ga4Present === "No") {
+      ga4Cell.font = { name: "Arial", size: 10, color: { argb: "FF9C0006" }, bold: true };
+    }
+    
     r.getCell("h1").alignment = { vertical: "middle", wrapText: true };
     r.getCell("h2").alignment = { vertical: "middle", wrapText: true };
 
@@ -1125,7 +1273,12 @@ async function buildExcel(siteName, crawlData, seoData, altData, linkData, aiDat
   const brokenLinks     = linkData.filter(d => d.status === 404 || d.status === -1).length;
   const internalLinks   = linkData.filter(d => d.type === "Internal").length;
   const externalLinks   = linkData.filter(d => d.type === "External").length;
-  const redirectedPages = seoData.filter(d => d.redirected).length;
+  const redirectedPages = seoData.filter(d => d.isRedirected === "Yes").length;
+  const redirectedCount = seoData.filter(d => d.isRedirected === "Yes" && d.redirectType).length;
+  
+  // GA4 Analytics stats
+  const ga4Present      = seoData.filter(d => d.ga4Present === "Yes").length;
+  const ga4Missing      = seoData.filter(d => d.ga4Present === "No").length;
 
   // AI summary stats
   const aiBlocked     = aiData.filter(d => d.accessStatus === "Blocked").length;
@@ -1151,6 +1304,10 @@ async function buildExcel(siteName, crawlData, seoData, altData, linkData, aiDat
     ["  Redirected Pages",       redirectedPages],
     ["  Missing Meta Title",     seoData.filter(d => !d.metaTitle || d.metaTitle === "Not Found").length],
     ["  Missing Meta Desc",      seoData.filter(d => !d.metaDesc  || d.metaDesc  === "Not Found").length],
+    ["",""],
+    ["📊 Analytics (GA4)",        ""],
+    ["  Pages with GA4",          ga4Present],
+    ["  Pages without GA4",       ga4Missing],
     ["",""],
     ["🖼️ Images",                ""],
     ["  Total Images",           altData.length],
