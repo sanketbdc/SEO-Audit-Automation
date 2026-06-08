@@ -10,8 +10,12 @@
  *   5. AI Visibility Audit (12-layer)        → Sheet 5  ← NEW
  *   6. Email the Excel report (HTML email)   ← ENHANCED
  *
- *  Usage:
- *    node seo_audit.js
+ *  Quick Run Commands:
+ *    node --max-old-space-size=8192 seo_audit.js                  → Full audit (all steps)
+ *    node --max-old-space-size=8192 seo_audit.js --only=crawl     → Only crawl URLs (Sheet 1)
+ *    node --max-old-space-size=8192 seo_audit.js --only=seo       → Only SEO audit (Sheet 2)
+ *    node --max-old-space-size=8192 seo_audit.js --only=alt       → Only image alt tags (Sheet 3)
+ *    node --max-old-space-size=8192 seo_audit.js --only=links     → Only internal/external links (Sheet 4)
  *
  *  Config: edit the CONFIG section below before running.
  * ============================================================
@@ -33,13 +37,14 @@ const CONFIG = {
   // ── Websites to audit (add as many as you want) ──────────
   // bypassHttpCheck: true  → use for Cloudflare/security protected sites (slower)
   // bypassHttpCheck: false → default, fast raw HTTP check
-  websites: [
+  websites: [ 
+ 
       { url: "https://www.shapoorjipallonji.com/",   bypassHttpCheck: false },
       { url: "https://www.viceroyproperties.in/",    bypassHttpCheck: false },
-     { url: "https://bombaydc.com/",                bypassHttpCheck: false },
-     { url: "https://shapoorjirealestate.com/",     bypassHttpCheck: false },
-     { url: "https://www.joyvillehomes.com/",       bypassHttpCheck: false },
-     { url: "https://www.bharat-connect.com/",      bypassHttpCheck: true  },
+      { url: "https://bombaydc.com/",                bypassHttpCheck: false },
+      { url: "https://shapoorjirealestate.com/",     bypassHttpCheck: false },
+      { url: "https://www.joyvillehomes.com/",       bypassHttpCheck: false },
+      { url: "https://www.bharat-connect.com/",      bypassHttpCheck: true  },
   ].filter(s => !process.env.AUDIT_SITE || s.url === process.env.AUDIT_SITE),
 
   // ── Output Excel file path ────────────────────────────────
@@ -65,7 +70,7 @@ const CONFIG = {
   // Cron format: 'minute hour day month weekday'
   // Examples: '0 8 1 * *' = 1st of month at 8AM
   //           '0 8 * * 1' = every Monday at 8AM
-  schedule: "0 2 8 5 *",
+  schedule: "0 6 8 * *",
 };
 // ╚══════════════════════════════════════════════════════════╝
 
@@ -1356,9 +1361,16 @@ async function buildExcel(siteName, crawlData, seoData, altData, linkData, aiDat
 //  MAIN — Runs all steps for each website
 // ══════════════════════════════════════════════════════════════════════════════
 async function runAudit() {
+  const onlyStep = process.argv.find(a => a.startsWith("--only="))?.split("=")[1];
+  const runSeo   = !onlyStep || onlyStep === "seo";
+  const runAlt   = !onlyStep || onlyStep === "alt";
+  const runLinks = !onlyStep || onlyStep === "links";
+  const runAi    = !onlyStep;
+
   console.log("\n╔══════════════════════════════════════════╗");
   console.log("║       SEO AUDIT TOOL — Starting          ║");
   console.log(`║  ${new Date().toLocaleString().padEnd(40)}║`);
+  if (onlyStep) console.log(`║  Mode: --only=${onlyStep.padEnd(27)}║`);
   console.log("╚══════════════════════════════════════════╝\n");
 
   const browser     = await chromium.launch({ headless: true });
@@ -1377,19 +1389,29 @@ async function runAudit() {
     console.log(`  🔒  Bypass HTTP Check: ${bypass ? "Yes (Cloudflare mode)" : "No (Fast mode)"}`);
     console.log(`${"═".repeat(55)}\n`);
 
-    console.log("  📡  STEP 1/5 — Crawling all URLs...");
+    console.log("  📡  STEP 1 — Crawling all URLs...");
     const crawlData = await crawlAllUrls(siteUrl, browser);
 
-    console.log("\n  🔍  STEP 2/5 — Fetching SEO details...");
-    const seoData   = await fetchSeoDetails(crawlData.urls, browser, bypass);
+    let seoData = [], altData = [], linkData = [], aiData = [];
 
-    console.log("\n  🖼️   STEP 3/5 — Auditing image alt tags...");
-    const altData   = await fetchAltTags(crawlData.urls, crawlData.baseDomain, browser);
+    if (runSeo) {
+      console.log("\n  🔍  STEP 2 — Fetching SEO details...");
+      seoData = await fetchSeoDetails(crawlData.urls, browser, bypass);
+    } else { console.log("\n  ⏭️   STEP 2 — Skipped"); }
 
-    console.log("\n  🔗  STEP 4/5 — Collecting internal/external links...");
-    const linkData  = await collectLinks(crawlData.urls, crawlData.baseDomain, browser);
+    if (runAlt) {
+      console.log("\n  🖼️   STEP 3 — Auditing image alt tags...");
+      altData = await fetchAltTags(crawlData.urls, crawlData.baseDomain, browser);
+    } else { console.log("\n  ⏭️   STEP 3 — Skipped"); }
 
-    const aiData    = await runAiVisibilityAudit(siteUrl, crawlData, seoData, linkData, browser);
+    if (runLinks) {
+      console.log("\n  🔗  STEP 4 — Collecting internal/external links...");
+      linkData = await collectLinks(crawlData.urls, crawlData.baseDomain, browser);
+    } else { console.log("\n  ⏭️   STEP 4 — Skipped"); }
+
+    if (runAi) {
+      aiData = await runAiVisibilityAudit(siteUrl, crawlData, seoData, linkData, browser);
+    } else { console.log("\n  ⏭️   STEP 5 — Skipped"); }
 
     console.log("\n  💾  Building Excel report...");
     const { wb, aiSummary } = await buildExcel(siteName, crawlData, seoData, altData, linkData, aiData);

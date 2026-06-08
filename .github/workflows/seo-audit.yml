@@ -2,7 +2,7 @@ name: SEO Audit
 
 on:
   schedule:
-    - cron: "0 20 7 5 *"   # May 8 at 2:00 AM IST (UTC 20:30 on May 7)
+    - cron: "30 0 8 * *"   # 8th of every month at 6:00 AM IST (UTC+5:30 = 00:30 UTC)
   workflow_dispatch:         # allows manual trigger from GitHub UI
 
 jobs:
@@ -22,7 +22,8 @@ jobs:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           AUDIT_SITE: "https://www.bharat-connect.com/"
-        run: node seo_audit.js
+          NODE_OPTIONS: "--max-old-space-size=8192"
+        run: node --max-old-space-size=8192 seo_audit.js
 
   audit-shapoorji-pallonji:
     runs-on: ubuntu-latest
@@ -39,7 +40,8 @@ jobs:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           AUDIT_SITE: "https://www.shapoorjipallonji.com/"
-        run: node seo_audit.js
+          NODE_OPTIONS: "--max-old-space-size=8192"
+        run: node --max-old-space-size=8192 seo_audit.js
 
   audit-shapoorji-realestate:
     runs-on: ubuntu-latest
@@ -56,7 +58,8 @@ jobs:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           AUDIT_SITE: "https://shapoorjirealestate.com/"
-        run: node seo_audit.js
+          NODE_OPTIONS: "--max-old-space-size=8192"
+        run: node --max-old-space-size=8192 seo_audit.js
 
   audit-joyville:
     runs-on: ubuntu-latest
@@ -73,7 +76,8 @@ jobs:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           AUDIT_SITE: "https://www.joyvillehomes.com/"
-        run: node seo_audit.js
+          NODE_OPTIONS: "--max-old-space-size=8192"
+        run: node --max-old-space-size=8192 seo_audit.js
 
   audit-viceroy:
     runs-on: ubuntu-latest
@@ -90,7 +94,8 @@ jobs:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           AUDIT_SITE: "https://www.viceroyproperties.in/"
-        run: node seo_audit.js
+          NODE_OPTIONS: "--max-old-space-size=8192"
+        run: node --max-old-space-size=8192 seo_audit.js
 
   audit-bombaydc:
     runs-on: ubuntu-latest
@@ -107,4 +112,5 @@ jobs:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           AUDIT_SITE: "https://bombaydc.com/"
-        run: node seo_audit.js
+          NODE_OPTIONS: "--max-old-space-size=8192"
+        run: node --max-old-space-size=8192 seo_audit.js
