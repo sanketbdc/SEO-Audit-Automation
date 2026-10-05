@@ -1,4 +1,4 @@
-name: SEO Audit Automation
+name: SEO Audit
 
 on:
   workflow_dispatch:
