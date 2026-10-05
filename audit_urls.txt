@@ -1,0 +1,19 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  SEO Audit — URL List
+#  Format:  <url>  OR  <url>|true  (|true = bypass HTTP check for Cloudflare)
+#  Lines starting with # are ignored (commented out).
+#
+#  Website URLs are crawled by following internal links.
+#  Sitemap/XML URLs are parsed, including nested sitemap indexes.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Website URL — crawl internal links starting from this page
+https://www.delhiredz.com/
+
+# Direct sitemap URL — parse it (supports nested sitemap indexes)
+// https://www.godrejenterprises.com/sitemap.xml
+
+# Website with Cloudflare protection — add |true to bypass HTTP check
+# https://www.example.com|true
+
+

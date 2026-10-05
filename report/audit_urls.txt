@@ -1,0 +1,2 @@
+# Add one website per line. Blank lines and lines beginning with # are ignored.
+# Add "| true" after a URL for Cloudflare/security-protected sites.
