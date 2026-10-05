@@ -1,0 +1,39 @@
+name: Delhrezs SEO Audit
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 0 * * 1'  # Every Monday at 06:00 AM IST (00:30 UTC)
+
+permissions:
+  contents: read
+
+jobs:
+  seo-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Delhrezs SEO Audit
+        env:
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          AUDIT_SITE: 'https://www.delhiredz.com/'
+          NODE_OPTIONS: '--max-old-space-size=8192'
+        run: node --max-old-space-size=8192 seo_audit.js
