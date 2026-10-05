@@ -146,6 +146,10 @@ function looksLikeXml(body, contentType) {
  */
 async function parseSitemapRecursive(sitemapUrl, baseDomain, visited = new Set(), depth = 0) {
   if (depth > 10 || visited.has(sitemapUrl)) return [];
+  if (!isSameHost(sitemapUrl, baseDomain)) {
+    console.warn(`  ⚠ Skipping sitemap on a different host: ${sitemapUrl}`);
+    return [];
+  }
   visited.add(sitemapUrl);
 
   const { ok, body, status } = await fetchText(sitemapUrl);
@@ -177,10 +181,7 @@ async function parseSitemapRecursive(sitemapUrl, baseDomain, visited = new Set()
     // Direct page URLs — filter to same domain
     const indent = "  ".repeat(depth + 1);
     const filtered = locs.filter(u => {
-      try {
-        const h = new URL(u).hostname;
-        return h === baseDomain || h.endsWith("." + baseDomain);
-      } catch { return false; }
+      return isSameHost(u, baseDomain);
     });
     console.log(`${indent}📄 URL set: ${sitemapUrl} → ${filtered.length} page URLs`);
     return filtered;
@@ -296,11 +297,19 @@ function shouldCrawl(urlStr, baseDomain) {
   try {
     const u = new URL(urlStr);
     if (!["http:","https:"].includes(u.protocol)) return false;
-    if (u.hostname !== baseDomain && !u.hostname.endsWith("." + baseDomain)) return false;
+    if (!isSameHost(urlStr, baseDomain)) return false;
     const pathname = u.pathname.split("?")[0].split("#")[0];
     const ext = path.extname(pathname).toLowerCase();
     if (MEDIA_EXT.has(ext)) return false;
     return true;
+  } catch { return false; }
+}
+
+function isSameHost(urlStr, baseDomain) {
+  try {
+    const hostname = new URL(urlStr).hostname.toLowerCase();
+    const base = baseDomain.toLowerCase();
+    return hostname === base || hostname === `www.${base}` || base === `www.${hostname}`;
   } catch { return false; }
 }
 
@@ -793,10 +802,7 @@ async function collectLinks(urls, baseDomain, browser) {
         if (!norm || visitedHrefs.has(norm)) continue;
         visitedHrefs.add(norm);
 
-        let linkHost;
-        try { linkHost = new URL(norm).hostname; } catch { continue; }
-
-        const isInternal = linkHost === baseDomain || linkHost.endsWith("." + baseDomain);
+        const isInternal = isSameHost(norm, baseDomain);
         const { status } = await getStatusAndFinalUrl(norm);
 
         results.push({
@@ -1778,19 +1784,15 @@ async function buildComparisonReport(siteName, previousReportPath, currentReport
     { name: "Sheet5 - AI Visibility", keys: ["URL"] },
   ];
   const datasetComparisons = [];
-  const recordChanges = [];
-  const fieldChanges = [];
+  const comparisonDetails = [];
 
   for (const { name, keys } of recordSheets) {
     const previousRecords = readReportRecords(previousWorkbook, name, keys);
     const currentRecords = readReportRecords(currentWorkbook, name, keys);
     const counts = { Added: 0, Removed: 0, Updated: 0, Unchanged: 0 };
-    const recordIds = new Set([...previousRecords.keys(), ...currentRecords.keys()]);
+    let fieldsChanged = 0;
 
-    for (const recordId of recordIds) {
-      const previous = previousRecords.get(recordId);
-      const current = currentRecords.get(recordId);
-      const record = current ?? previous;
+    const compareRecord = (previous, current) => {
       const fields = new Set([
         ...(previous?.values.keys() ?? []),
         ...(current?.values.keys() ?? []),
@@ -1815,23 +1817,30 @@ async function buildComparisonReport(siteName, previousReportPath, currentReport
       }
 
       counts[status]++;
-      if (status === "Unchanged") continue;
 
-      const identity = record.identity.join(" | ");
-      const changedFields = status === "Updated"
-        ? changes
-        : [...fields]
-          .filter(field => field && field !== "#")
-          .map(field => ({
-            field,
-            previous: previous?.values.get(field) ?? "",
-            current: current?.values.get(field) ?? "",
-          }));
-
-      recordChanges.push({ section: name, status, identity, fieldsChanged: changedFields.length });
-      for (const change of changedFields) {
-        fieldChanges.push({ section: name, status, identity, ...change });
+      if (status === "Updated") {
+        const identity = current.identity.join(" | ");
+        for (const change of changes) {
+          comparisonDetails.push({ section: name, status, identity, ...change });
+          fieldsChanged++;
+        }
+      } else if (status === "Removed" || (status === "Added" && previousReportPath)) {
+        const record = current ?? previous;
+        comparisonDetails.push({
+          section: name,
+          status,
+          identity: record.identity.join(" | "),
+          values: record.values,
+        });
+        fieldsChanged += [...record.values.keys()].filter(field => field && field !== "#").length;
       }
+    };
+
+    for (const [recordId, previous] of previousRecords) {
+      compareRecord(previous, currentRecords.get(recordId));
+    }
+    for (const [recordId, current] of currentRecords) {
+      if (!previousRecords.has(recordId)) compareRecord(undefined, current);
     }
 
     datasetComparisons.push({
@@ -1839,7 +1848,7 @@ async function buildComparisonReport(siteName, previousReportPath, currentReport
       previousCount: previousRecords.size,
       currentCount: currentRecords.size,
       ...counts,
-      fieldsChanged: fieldChanges.filter(change => change.section === name).length,
+      fieldsChanged,
     });
   }
 
@@ -1849,11 +1858,11 @@ async function buildComparisonReport(siteName, previousReportPath, currentReport
 
   const summarySheet = comparisonWorkbook.addWorksheet("Summary Changes");
   summarySheet.columns = [
-    { key: "metric", width: 38 },
-    { key: "previous", width: 42 },
-    { key: "current", width: 42 },
-    { key: "change", width: 16 },
-    { key: "status", width: 16 },
+    { key: "metric", width: 30 },
+    { key: "previous", width: 36 },
+    { key: "current", width: 55 },
+    { key: "change", width: 30 },
+    { key: "status", width: 50 },
     { key: "added", width: 12 },
     { key: "removed", width: 12 },
     { key: "updated", width: 12 },
@@ -1887,12 +1896,19 @@ async function buildComparisonReport(siteName, previousReportPath, currentReport
       : previous && !current ? "Removed"
       : previous === current ? "Unchanged"
       : "Updated";
+    if (status === "Unchanged") continue;
     summarySheet.addRow([metric, previous, current, delta, status]);
   }
 
-  for (let rowNumber = 5; rowNumber <= summarySheet.rowCount; rowNumber++) {
+  const metricEndRow = summarySheet.rowCount;
+  for (let rowNumber = 6; rowNumber <= metricEndRow; rowNumber++) {
     const row = summarySheet.getRow(rowNumber);
     styleComparisonDataRow(row, rowNumber, 5);
+    if (row.getCell(5).value === "Updated") {
+      for (const column of [2, 3, 4]) {
+        row.getCell(column).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFF2CC" } };
+      }
+    }
   }
 
   summarySheet.addRow([]);
@@ -1912,38 +1928,39 @@ async function buildComparisonReport(siteName, previousReportPath, currentReport
     ]);
     styleDataRow(row, row.number);
   }
+
+  summarySheet.addRow([]);
+  const detailHeaderRow = summarySheet.rowCount + 1;
+  summarySheet.addRow(["Dataset", "Change type", "URL / Item", "Field", "Previous value", "Current value"]);
+  styleHeader(summarySheet.getRow(detailHeaderRow), "FF1F3864");
+  for (const detail of comparisonDetails) {
+    const fieldChanges = detail.values
+      ? [...detail.values]
+        .filter(([field]) => field && field !== "#")
+        .map(([field, value]) => ({
+          field,
+          previous: detail.status === "Removed" ? value : "",
+          current: detail.status === "Added" ? value : "",
+        }))
+      : [detail];
+
+    for (const change of fieldChanges) {
+      const row = summarySheet.addRow([
+        detail.section,
+        detail.status,
+        detail.identity,
+        change.field,
+        change.previous,
+        change.current,
+      ]);
+      styleComparisonDataRow(row, row.number, 2);
+      for (const column of [5, 6]) {
+        row.getCell(column).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFF2CC" } };
+      }
+    }
+  }
   summarySheet.views = [{ state: "frozen", ySplit: 5 }];
   summarySheet.autoFilter = { from: { row: 5, column: 1 }, to: { row: 5, column: 5 } };
-
-  const recordsSheet = comparisonWorkbook.addWorksheet("Record Changes");
-  recordsSheet.columns = [
-    { header: "Report Section", key: "section", width: 28 },
-    { header: "Change Type", key: "status", width: 16 },
-    { header: "URL / Item", key: "identity", width: 82 },
-    { header: "Fields Changed", key: "fieldsChanged", width: 16 },
-  ];
-  styleHeader(recordsSheet.getRow(1), "FF1F3864");
-  for (const change of recordChanges) recordsSheet.addRow(change);
-  for (let rowNumber = 2; rowNumber <= recordsSheet.rowCount; rowNumber++) {
-    styleComparisonDataRow(recordsSheet.getRow(rowNumber), rowNumber, 2);
-  }
-  freezeAndFilter(recordsSheet, 4);
-
-  const changesSheet = comparisonWorkbook.addWorksheet("Field Changes");
-  changesSheet.columns = [
-    { header: "Report Section", key: "section", width: 28 },
-    { header: "Change Type", key: "status", width: 16 },
-    { header: "URL / Item", key: "identity", width: 68 },
-    { header: "Field", key: "field", width: 28 },
-    { header: "Previous", key: "previous", width: 55 },
-    { header: "Current", key: "current", width: 55 },
-  ];
-  styleHeader(changesSheet.getRow(1), "FF375623");
-  for (const change of fieldChanges) changesSheet.addRow(change);
-  for (let rowNumber = 2; rowNumber <= changesSheet.rowCount; rowNumber++) {
-    styleComparisonDataRow(changesSheet.getRow(rowNumber), rowNumber, 2);
-  }
-  freezeAndFilter(changesSheet, 6);
 
   return comparisonWorkbook;
 }
