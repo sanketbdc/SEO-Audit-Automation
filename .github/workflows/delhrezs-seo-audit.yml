@@ -1,4 +1,4 @@
-name: Delhrezs SEO Audit
+name: SEO Audit Automation
 
 on:
   workflow_dispatch:
@@ -9,9 +9,49 @@ permissions:
   contents: read
 
 jobs:
+  prepare-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      urls: ${{ steps.read_urls.outputs.urls }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read URLs from audit_urls.txt
+        id: read_urls
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, re
+          from pathlib import Path
+
+          file_path = Path('audit_urls.txt')
+          urls = []
+          if file_path.exists():
+              for raw in file_path.read_text(encoding='utf-8').splitlines():
+                  line = raw.strip()
+                  if not line or line.startswith('#') or line.startswith('//'):
+                      continue
+                  cleaned = re.sub(r'^[-*]\s*', '', line)
+                  if '|' in cleaned:
+                      cleaned = cleaned.split('|', 1)[0].strip()
+                  match = re.search(r'https?://[^\s)]+', cleaned, re.I)
+                  if match:
+                      urls.append(match.group(0).rstrip('),'))
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as fh:
+              fh.write(f"urls={json.dumps(urls)}\n")
+          print(json.dumps(urls))
+          PY
+
   seo-audit:
+    needs: prepare-matrix
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        site: ${{ fromJSON(needs.prepare-matrix.outputs.urls) }}
 
     steps:
       - name: Checkout repository
@@ -29,11 +69,11 @@ jobs:
       - name: Install Playwright browser
         run: npx playwright install --with-deps chromium
 
-      - name: Run Delhrezs SEO Audit
+      - name: Run SEO Audit for ${{ matrix.site }}
         env:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
-          AUDIT_SITE: 'https://www.delhiredz.com/'
+          AUDIT_SITE: ${{ matrix.site }}
           NODE_OPTIONS: '--max-old-space-size=8192'
         run: node --max-old-space-size=8192 seo_audit.js
