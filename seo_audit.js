@@ -42,6 +42,31 @@ const path          = require("path");
 const https         = require("https");
 const http          = require("http");
 
+function normalizeAuditEntry(line, filePath) {
+  if (!line) return null;
+
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("//")) return null;
+
+  let cleaned = trimmed;
+  const markdownUrlMatch = cleaned.match(/https?:\/\/[^\s)]+/i);
+  if (markdownUrlMatch) {
+    cleaned = markdownUrlMatch[0];
+  }
+
+  cleaned = cleaned.replace(/^[-*]\s*/, "").replace(/^['"`]+|['"`]+$/g, "").trim();
+  if (!cleaned) return null;
+
+  const [rawUrl, bypass] = cleaned.split("|").map(value => value.trim());
+  if (!rawUrl) return null;
+
+  const urlMatch = rawUrl.match(/https?:\/\/[^\s)]+/i);
+  const url = urlMatch ? urlMatch[0].replace(/[),]+$/, "") : rawUrl;
+
+  try { new URL(url); } catch { throw new Error(`Invalid URL in ${filePath}: ${rawUrl}`); }
+  return { url, bypassHttpCheck: bypass?.toLowerCase() === "true" };
+}
+
 function loadAuditSites() {
   const urlsArg = process.argv.find(arg => arg.startsWith("--urls="));
   const filePath = path.resolve(urlsArg ? urlsArg.slice("--urls=".length) : path.join(__dirname, "audit_urls.txt"));
@@ -53,13 +78,8 @@ function loadAuditSites() {
 
   const sites = fs.readFileSync(filePath, "utf8")
     .split(/\r?\n/)
-    .map(line => line.trim())
-    .filter(line => line && !line.startsWith("#"))
-    .map(line => {
-      const [url, bypass] = line.split("|").map(value => value.trim());
-      try { new URL(url); } catch { throw new Error(`Invalid URL in ${filePath}: ${url}`); }
-      return { url, bypassHttpCheck: bypass?.toLowerCase() === "true" };
-    });
+    .map(line => normalizeAuditEntry(line, filePath))
+    .filter(Boolean);
 
   if (!sites.length) throw new Error(`No URLs found in ${filePath}`);
   console.log(`  📄 URL list: ${filePath} (${sites.length} site${sites.length === 1 ? "" : "s"})`);

@@ -11,7 +11,7 @@
 https://www.delhiredz.com/
 
 # Direct sitemap URL — parse it (supports nested sitemap indexes)
-// https://www.godrejenterprises.com/sitemap.xml
+# https://www.godrejenterprises.com/sitemap.xml
 
 # Website with Cloudflare protection — add |true to bypass HTTP check
 # https://www.example.com|true
