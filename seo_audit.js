@@ -1674,11 +1674,25 @@ async function buildExcel(siteName, crawlData, seoData, altData, linkData, aiDat
 function findPreviousReport(siteName, currentReportPath) {
   const prefix = `SEO_Audit_${siteName}_`;
   const currentPath = path.resolve(currentReportPath);
-  const candidates = fs.readdirSync(__dirname)
-    .filter(file => file.startsWith(prefix) && file.endsWith(".xlsx") &&
-      path.resolve(__dirname, file) !== currentPath)
-    .sort((a, b) => b.localeCompare(a));
-  return candidates.length ? path.join(__dirname, candidates[0]) : null;
+  const searchDirs = [
+    __dirname,
+    path.join(__dirname, "report"),
+    path.resolve(__dirname, "report"),
+  ].filter((dir, index, arr) => dir && arr.indexOf(dir) === index && fs.existsSync(dir));
+
+  const candidates = [];
+  for (const dir of searchDirs) {
+    const files = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+    for (const file of files) {
+      const fullPath = path.resolve(dir, file);
+      if (file.startsWith(prefix) && file.endsWith(".xlsx") && fullPath !== currentPath) {
+        candidates.push(fullPath);
+      }
+    }
+  }
+
+  candidates.sort((a, b) => b.localeCompare(a));
+  return candidates.length ? candidates[0] : null;
 }
 
 function displayCellValue(cell) {
