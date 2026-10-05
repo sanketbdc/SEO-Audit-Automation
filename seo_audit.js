@@ -1686,13 +1686,16 @@ function findPreviousReport(siteName, currentReportPath) {
     for (const file of files) {
       const fullPath = path.resolve(dir, file);
       if (file.startsWith(prefix) && file.endsWith(".xlsx") && fullPath !== currentPath) {
-        candidates.push(fullPath);
+        candidates.push({
+          path: fullPath,
+          mtime: fs.statSync(fullPath).mtimeMs,
+        });
       }
     }
   }
 
-  candidates.sort((a, b) => b.localeCompare(a));
-  return candidates.length ? candidates[0] : null;
+  candidates.sort((a, b) => b.mtime - a.mtime);
+  return candidates.length ? candidates[0].path : null;
 }
 
 function displayCellValue(cell) {
