@@ -10,9 +10,26 @@ permissions:
 
 jobs:
   seo-audit:
-    name: SEO Audit
+    name: SEO Audit - ${{ matrix.site_name }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - site_name: bharat-connect
+            url: https://www.bharat-connect.com/
+          - site_name: shapoorji-pallonji
+            url: https://www.shapoorjipallonji.com/
+          - site_name: shapoorji-realestate
+            url: https://shapoorjirealestate.com/
+          - site_name: joyville
+            url: https://www.joyvillehomes.com/
+          - site_name: viceroy
+            url: https://www.viceroyproperties.in/
+          - site_name: bombaydc
+            url: https://bombaydc.com/
 
     steps:
       - name: Checkout repository
@@ -35,6 +52,6 @@ jobs:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
-          AUDIT_SITE: 'https://www.bharat-connect.com/'
+          AUDIT_SITE: ${{ matrix.url }}
           NODE_OPTIONS: '--max-old-space-size=8192'
         run: node --max-old-space-size=8192 seo_audit.js
