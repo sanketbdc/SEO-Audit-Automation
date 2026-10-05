@@ -7,12 +7,13 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   prepare-matrix:
     runs-on: ubuntu-latest
     outputs:
-      urls: ${{ steps.read_urls.outputs.urls }}
+      sites: ${{ steps.read_urls.outputs.sites }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -24,9 +25,10 @@ jobs:
           python - <<'PY'
           import json, os, re
           from pathlib import Path
+          from urllib.parse import urlparse
 
           file_path = Path('audit_urls.txt')
-          urls = []
+          sites = []
           if file_path.exists():
               for raw in file_path.read_text(encoding='utf-8').splitlines():
                   line = raw.strip()
@@ -37,11 +39,12 @@ jobs:
                       cleaned = cleaned.split('|', 1)[0].strip()
                   match = re.search(r'https?://[^\s)]+', cleaned, re.I)
                   if match:
-                      urls.append(match.group(0).rstrip('),'))
+                    url = match.group(0).rstrip('),')
+                    sites.append({'url': url, 'key': urlparse(url).hostname.lower()})
 
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as fh:
-              fh.write(f"urls={json.dumps(urls)}\n")
-          print(json.dumps(urls))
+              fh.write(f"sites={json.dumps(sites)}\n")
+          print(json.dumps(sites))
           PY
 
   seo-audit:
@@ -51,7 +54,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        site: ${{ fromJSON(needs.prepare-matrix.outputs.urls) }}
+        site: ${{ fromJSON(needs.prepare-matrix.outputs.sites) }}
 
     steps:
       - name: Checkout repository
@@ -69,11 +72,75 @@ jobs:
       - name: Install Playwright browser
         run: npx playwright install --with-deps chromium
 
-      - name: Run SEO Audit for ${{ matrix.site }}
+      - name: Find previous baseline artifact
+        id: previous
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SITE_KEY: ${{ matrix.site.key }}
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const artifactName = `seo-baseline-${process.env.SITE_KEY}`;
+          const endpoint = `https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}/actions/artifacts?name=${encodeURIComponent(artifactName)}&per_page=100`;
+          fetch(endpoint, {
+            headers: {
+              Authorization: `Bearer ${process.env.GH_TOKEN}`,
+              Accept: 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28'
+            }
+          }).then(async response => {
+            if (!response.ok) throw new Error(`Artifact lookup failed: ${response.status} ${await response.text()}`);
+            const data = await response.json();
+            const previous = data.artifacts
+              .filter(artifact => !artifact.expired && String(artifact.workflow_run?.id) !== process.env.GITHUB_RUN_ID)
+              .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))[0];
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `run_id=${previous?.workflow_run?.id ?? ''}\n`);
+            console.log(previous ? `Found baseline from run ${previous.workflow_run.id}` : 'No saved baseline found; this is the initial audit.');
+          }).catch(error => { console.error(error); process.exitCode = 1; });
+          NODE
+
+      - name: Download previous audit baseline
+        if: steps.previous.outputs.run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: seo-baseline-${{ matrix.site.key }}
+          run-id: ${{ steps.previous.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: report
+
+      - name: Run SEO Audit for ${{ matrix.site.url }}
         env:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
-          AUDIT_SITE: ${{ matrix.site }}
+          AUDIT_SITE: ${{ matrix.site.url }}
           NODE_OPTIONS: '--max-old-space-size=8192'
         run: node --max-old-space-size=8192 seo_audit.js
+
+      - name: Save current audit as next baseline
+        env:
+          AUDIT_SITE: ${{ matrix.site.url }}
+        run: |
+          python - <<'PY'
+          import os, shutil
+          from pathlib import Path
+          from urllib.parse import urlparse
+
+          site_key = urlparse(os.environ['AUDIT_SITE']).hostname.lower()
+          reports = sorted(Path('.').glob(f'SEO_Audit_{site_key}_*.xlsx'), key=lambda path: path.stat().st_mtime)
+          if not reports:
+              raise SystemExit(f'No current SEO audit workbook found for {site_key}')
+          baseline_dir = Path('report')
+          baseline_dir.mkdir(exist_ok=True)
+          baseline_path = baseline_dir / f'SEO_Audit_{site_key}_baseline.xlsx'
+          shutil.copy2(reports[-1], baseline_path)
+          print(f'Saved {baseline_path} as the next comparison baseline')
+          PY
+
+      - name: Upload current audit baseline
+        uses: actions/upload-artifact@v4
+        with:
+          name: seo-baseline-${{ matrix.site.key }}
+          path: report/SEO_Audit_${{ matrix.site.key }}_baseline.xlsx
+          if-no-files-found: error
+          retention-days: 90

@@ -1768,7 +1768,7 @@ function styleComparisonDataRow(row, index, statusColumn) {
 
 async function buildComparisonReport(siteName, previousReportPath, currentReportPath, currentWorkbook) {
   const previousWorkbook = new ExcelJS.Workbook();
-  await previousWorkbook.xlsx.readFile(previousReportPath);
+  if (previousReportPath) await previousWorkbook.xlsx.readFile(previousReportPath);
 
   const recordSheets = [
     { name: "Sheet1 - All URLs", keys: ["URL"] },
@@ -1866,7 +1866,7 @@ async function buildComparisonReport(siteName, previousReportPath, currentReport
   summarySheet.getCell("A1").fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9E1F2" } };
   summarySheet.getCell("A1").alignment = { vertical: "middle" };
   summarySheet.getRow(1).height = 30;
-  summarySheet.addRow(["Previous report", path.basename(previousReportPath)]);
+  summarySheet.addRow(["Previous report", previousReportPath ? path.basename(previousReportPath) : "Initial baseline (no previous report)"]);
   summarySheet.addRow(["Current report", path.basename(currentReportPath)]);
   summarySheet.addRow([]);
   summarySheet.addRow(["Summary metric", "Previous run", "Current run", "Numeric delta", "Status"]);
@@ -2037,18 +2037,18 @@ async function runAudit() {
       console.log(`  📊  Saved → ${outputFile}`);
 
       attachments.push({ filename: path.basename(outputFile), path: outputFile, siteName });
-      if (previousReportPath) {
-        const comparisonFile = path.join(path.dirname(outputFile), `SEO_Comparison_${siteName}_${timestamp}.xlsx`);
-        try {
-          const comparisonWorkbook = await buildComparisonReport(siteName, previousReportPath, outputFile, wb);
-          await comparisonWorkbook.xlsx.writeFile(comparisonFile);
+      const comparisonFile = path.join(path.dirname(outputFile), `SEO_Comparison_${siteName}_${timestamp}.xlsx`);
+      try {
+        const comparisonWorkbook = await buildComparisonReport(siteName, previousReportPath, outputFile, wb);
+        await comparisonWorkbook.xlsx.writeFile(comparisonFile);
+        if (previousReportPath) {
           console.log(`  📊  Comparison report saved → ${comparisonFile}`);
-          attachments.push({ filename: path.basename(comparisonFile), path: comparisonFile, siteName });
-        } catch (comparisonError) {
-          console.warn(`  ⚠ Comparison report failed: ${comparisonError.message}`);
+        } else {
+          console.log(`  📊  Initial comparison report saved → ${comparisonFile}`);
         }
-      } else {
-        console.log(`  ℹ️  No previous report found for ${siteName}; comparison skipped`);
+        attachments.push({ filename: path.basename(comparisonFile), path: comparisonFile, siteName });
+      } catch (comparisonError) {
+        console.warn(`  ⚠ Comparison report failed: ${comparisonError.message}`);
       }
       allSiteSummaries.push({ siteName, siteUrl, aiSummary, crawlCount: crawlData.urls.length });
       auditResults[siteIdx].status = "✓ Completed";
