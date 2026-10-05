@@ -2,25 +2,31 @@ name: SEO Audit
 
 on:
   schedule:
-    - cron: "30 0 8 * *"   # 8th of every month at 6:00 AM IST (UTC+5:30 = 00:30 UTC)
-  workflow_dispatch:         # allows manual trigger from GitHub UI
+    - cron: "30 0 * * 1" # Every Monday at 06:00 AM IST (00:30 UTC)
+  workflow_dispatch:
 
 jobs:
-
   audit-bharat-connect:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
-          node-version: "18"
-      - run: npm install
-      - run: npx playwright install chromium --with-deps
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
       - name: Run SEO Audit - bharat-connect.com
         env:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
           AUDIT_SITE: "https://www.bharat-connect.com/"
           NODE_OPTIONS: "--max-old-space-size=8192"
         run: node --max-old-space-size=8192 seo_audit.js
@@ -29,16 +35,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
-          node-version: "18"
-      - run: npm install
-      - run: npx playwright install chromium --with-deps
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
       - name: Run SEO Audit - shapoorjipallonji.com
         env:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
           AUDIT_SITE: "https://www.shapoorjipallonji.com/"
           NODE_OPTIONS: "--max-old-space-size=8192"
         run: node --max-old-space-size=8192 seo_audit.js
@@ -47,16 +60,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
-          node-version: "18"
-      - run: npm install
-      - run: npx playwright install chromium --with-deps
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
       - name: Run SEO Audit - shapoorjirealestate.com
         env:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
           AUDIT_SITE: "https://shapoorjirealestate.com/"
           NODE_OPTIONS: "--max-old-space-size=8192"
         run: node --max-old-space-size=8192 seo_audit.js
@@ -65,16 +85,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
-          node-version: "18"
-      - run: npm install
-      - run: npx playwright install chromium --with-deps
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
       - name: Run SEO Audit - joyvillehomes.com
         env:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
           AUDIT_SITE: "https://www.joyvillehomes.com/"
           NODE_OPTIONS: "--max-old-space-size=8192"
         run: node --max-old-space-size=8192 seo_audit.js
@@ -83,16 +110,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
-          node-version: "18"
-      - run: npm install
-      - run: npx playwright install chromium --with-deps
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
       - name: Run SEO Audit - viceroyproperties.in
         env:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
           AUDIT_SITE: "https://www.viceroyproperties.in/"
           NODE_OPTIONS: "--max-old-space-size=8192"
         run: node --max-old-space-size=8192 seo_audit.js
@@ -101,16 +135,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
-          node-version: "18"
-      - run: npm install
-      - run: npx playwright install chromium --with-deps
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
       - name: Run SEO Audit - bombaydc.com
         env:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
           AUDIT_SITE: "https://bombaydc.com/"
           NODE_OPTIONS: "--max-old-space-size=8192"
         run: node --max-old-space-size=8192 seo_audit.js

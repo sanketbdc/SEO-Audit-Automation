@@ -16,6 +16,18 @@
  *    node --max-old-space-size=8192 seo_audit.js --only=seo       → Only SEO audit (Sheet 2)
  *    node --max-old-space-size=8192 seo_audit.js --only=alt       → Only image alt tags (Sheet 3)
  *    node --max-old-space-size=8192 seo_audit.js --only=links     → Only internal/external links (Sheet 4)
+ *    node --max-old-space-size=8192 seo_audit.js --only=ai        → Only AI visibility audit (Sheet 5)
+ *    node --max-old-space-size=8192 seo_audit.js --urls=my_urls.txt --only=seo
+ *
+ *  audit_urls.txt format (one entry per line):
+ *    https://www.example.com                  → website URL (crawls internal links)
+ *    https://www.example.com/sitemap.xml      → direct sitemap URL
+ *    https://www.example.com/sitemap.xml|true → sitemap + bypass HTTP check (Cloudflare)
+ *    # https://www.skipped.com                → commented out = skipped
+ *
+ *  URL Discovery Logic (per site):
+ *    1. If input URL is a sitemap/XML → parse it (supports nested sitemap indexes)
+ *    2. If input URL is a website    → crawl the website via internal links
  *
  *  Config: edit the CONFIG section below before running.
  * ============================================================
@@ -25,9 +37,179 @@ const { chromium }  = require("playwright");
 const ExcelJS       = require("exceljs");
 const nodemailer    = require("nodemailer");
 const cron          = require("node-cron");
+const fs            = require("fs");
 const path          = require("path");
 const https         = require("https");
 const http          = require("http");
+
+function loadAuditSites() {
+  const urlsArg = process.argv.find(arg => arg.startsWith("--urls="));
+  const filePath = path.resolve(urlsArg ? urlsArg.slice("--urls=".length) : path.join(__dirname, "audit_urls.txt"));
+
+  if (!fs.existsSync(filePath)) {
+    console.warn(`  ⚠ URL list not found: ${filePath}. Using the default site.`);
+    return [{ url: "https://www.godrejenterprises.com/", bypassHttpCheck: false }];
+  }
+
+  const sites = fs.readFileSync(filePath, "utf8")
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line && !line.startsWith("#"))
+    .map(line => {
+      const [url, bypass] = line.split("|").map(value => value.trim());
+      try { new URL(url); } catch { throw new Error(`Invalid URL in ${filePath}: ${url}`); }
+      return { url, bypassHttpCheck: bypass?.toLowerCase() === "true" };
+    });
+
+  if (!sites.length) throw new Error(`No URLs found in ${filePath}`);
+  console.log(`  📄 URL list: ${filePath} (${sites.length} site${sites.length === 1 ? "" : "s"})`);
+  return sites;
+}
+
+// ── Sitemap / URL Discovery ───────────────────────────────────────────────────
+
+/** Fetch raw text from a URL via http/https */
+function fetchText(url, timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    try {
+      const parsed = new URL(url);
+      const lib = parsed.protocol === "https:" ? https : http;
+      let body = "";
+      const req = lib.get(
+        { hostname: parsed.hostname, path: parsed.pathname + parsed.search,
+          headers: { "User-Agent": "Mozilla/5.0 (SEO-Audit-Bot/1.0)" },
+          timeout: timeoutMs, rejectUnauthorized: false },
+        (res) => {
+          if ([301,302,303,307,308].includes(res.statusCode) && res.headers.location) {
+            return fetchText(new URL(res.headers.location, url).href, timeoutMs).then(resolve);
+          }
+          res.setEncoding("utf8");
+          res.on("data", d => { body += d; });
+          res.on("end", () => resolve({ ok: true, body, status: res.statusCode, contentType: res.headers["content-type"] || "" }));
+        }
+      );
+      req.on("error", () => resolve({ ok: false, body: "", status: -1, contentType: "" }));
+      req.on("timeout", () => { req.destroy(); resolve({ ok: false, body: "", status: -1, contentType: "" }); });
+    } catch { resolve({ ok: false, body: "", status: -1, contentType: "" }); }
+  });
+}
+
+/** Extract all <loc> values from a sitemap XML string */
+function extractLocsFromXml(xml) {
+  const locs = [];
+  const re = /<loc>\s*([^<]+?)\s*<\/loc>/gi;
+  let m;
+  while ((m = re.exec(xml)) !== null) locs.push(m[1].trim());
+  return locs;
+}
+
+/** Determine if XML is a sitemap index (contains <sitemapindex>) */
+function isSitemapIndex(xml) {
+  return /<sitemapindex[\s>]/i.test(xml);
+}
+
+/** Determine if XML is a urlset (contains <urlset>) */
+function isUrlSet(xml) {
+  return /<urlset[\s>]/i.test(xml);
+}
+
+/** Determine if content looks like XML/sitemap */
+function looksLikeXml(body, contentType) {
+  if (/xml/i.test(contentType)) return true;
+  const trimmed = body.trimStart();
+  return trimmed.startsWith("<?xml") || trimmed.startsWith("<sitemapindex") || trimmed.startsWith("<urlset");
+}
+
+/**
+ * Recursively parse a sitemap URL.
+ * Returns array of page URLs (not sub-sitemap URLs).
+ */
+async function parseSitemapRecursive(sitemapUrl, baseDomain, visited = new Set(), depth = 0) {
+  if (depth > 10 || visited.has(sitemapUrl)) return [];
+  visited.add(sitemapUrl);
+
+  const { ok, body, status } = await fetchText(sitemapUrl);
+  if (!ok || !body) {
+    console.warn(`  ⚠ Sitemap fetch failed (${status}): ${sitemapUrl}`);
+    return [];
+  }
+
+  if (!looksLikeXml(body, "")) {
+    console.warn(`  ⚠ Not XML content at: ${sitemapUrl}`);
+    return [];
+  }
+
+  const locs = extractLocsFromXml(body);
+
+  if (isSitemapIndex(body)) {
+    // Nested sitemap — recurse into each child sitemap
+    const indent = "  ".repeat(depth + 1);
+    console.log(`${indent}📂 Sitemap index: ${sitemapUrl} → ${locs.length} child sitemaps`);
+    const pageUrls = [];
+    for (const loc of locs) {
+      const childUrls = await parseSitemapRecursive(loc, baseDomain, visited, depth + 1);
+      pageUrls.push(...childUrls);
+    }
+    return pageUrls;
+  }
+
+  if (isUrlSet(body)) {
+    // Direct page URLs — filter to same domain
+    const indent = "  ".repeat(depth + 1);
+    const filtered = locs.filter(u => {
+      try {
+        const h = new URL(u).hostname;
+        return h === baseDomain || h.endsWith("." + baseDomain);
+      } catch { return false; }
+    });
+    console.log(`${indent}📄 URL set: ${sitemapUrl} → ${filtered.length} page URLs`);
+    return filtered;
+  }
+
+  console.warn(`  ⚠ Unrecognised XML structure at: ${sitemapUrl}`);
+  return [];
+}
+
+/**
+ * Master URL discovery function.
+ * Auto-detects whether input is a sitemap URL or website URL.
+ * Returns { urls[], baseDomain, errors[], discoveryMethod }
+ */
+async function discoverUrls(inputUrl, browser) {
+  let parsed;
+  try { parsed = new URL(inputUrl); } catch { throw new Error(`Invalid URL: ${inputUrl}`); }
+  const baseDomain = parsed.hostname;
+
+  // Only parse the supplied URL when it is XML; website URLs go straight to crawling.
+  const res = await fetchText(inputUrl);
+  const isXmlPath = /\.xml(?:$|[?#])/i.test(inputUrl);
+  if ((res.ok && res.body && looksLikeXml(res.body, res.contentType)) || isXmlPath) {
+    console.log(`  🗺️  Input is a sitemap URL — parsing...`);
+    const pageUrls = await parseSitemapRecursive(inputUrl, baseDomain, new Set(), 0);
+    if (pageUrls.length > 0) {
+      const unique = [...new Set(pageUrls.map(u => normalizeUrl(u)).filter(Boolean))].sort();
+      console.log(`  ✅ Sitemap discovery complete — ${unique.length} unique URLs`);
+      return { urls: unique, baseDomain, errors: [], discoveryMethod: "sitemap" };
+    }
+    console.warn(`  ⚠ Sitemap parsed but no URLs found`);
+    return { urls: [], baseDomain, errors: [], discoveryMethod: "sitemap" };
+  }
+
+  console.log(`  🌐 Input is a website URL — crawling internal links...`);
+  console.log(`  🕷️  Starting website crawl from: ${inputUrl}`);
+  const crawlResult = await crawlAllUrls(inputUrl, browser);
+  return { ...crawlResult, discoveryMethod: "crawl" };
+}
+
+const manualUrlMode = process.argv.some(arg => arg.startsWith("--urls=")) ||
+  fs.existsSync(path.join(__dirname, "audit_urls.txt"));
+
+function parseEmailList(value) {
+  return String(value || "")
+    .split(/[\n,;]/)
+    .map(email => email.trim())
+    .filter(Boolean);
+}
 
 // ╔══════════════════════════════════════════════════════════╗
 // ║                   USER CONFIG                           ║
@@ -37,20 +219,15 @@ const CONFIG = {
   // ── Websites to audit (add as many as you want) ──────────
   // bypassHttpCheck: true  → use for Cloudflare/security protected sites (slower)
   // bypassHttpCheck: false → default, fast raw HTTP check
-  websites: [ 
- 
-      { url: "https://www.shapoorjipallonji.com/",   bypassHttpCheck: false },
-      { url: "https://www.viceroyproperties.in/",    bypassHttpCheck: false },
-      { url: "https://bombaydc.com/",                bypassHttpCheck: false },
-      { url: "https://shapoorjirealestate.com/",     bypassHttpCheck: false },
-      { url: "https://www.joyvillehomes.com/",       bypassHttpCheck: false },
-      { url: "https://www.bharat-connect.com/",      bypassHttpCheck: true  },
-  ].filter(s => !process.env.AUDIT_SITE || s.url === process.env.AUDIT_SITE),
+  websites: loadAuditSites().filter(s => !process.env.AUDIT_SITE || s.url === process.env.AUDIT_SITE),
 
   // ── Output Excel file path ────────────────────────────────
   outputFile: "SEO_Audit_Report.xlsx",
 
   // ── Crawler settings ──────────────────────────────────────
+  // Set this high enough to allow a real full-site crawl rather than stopping
+  // after a fixed number of URLs.
+  crawlMaxUrls     : 20000,
   crawlConcurrency : 5,
   crawlTimeout     : 30_000,
 
@@ -62,15 +239,14 @@ const CONFIG = {
     secure  : false,
     user    : process.env.EMAIL_USER,
     pass    : process.env.EMAIL_PASS,
-    to      : ["sanket@bombaydc.com", "mangesh@bombaydc.com"],
+    to      : parseEmailList(process.env.EMAIL_TO || process.env.EMAIL_RECIPIENTS || "sanket@bombaydc.com"),
   },
 
   // ── Scheduler settings ────────────────────────────────────
-  // Runs on the 1st of every month at 8:00 AM
+  // GitHub Actions uses UTC time. This runs every Monday at 06:00 AM IST = 00:30 UTC.
   // Cron format: 'minute hour day month weekday'
-  // Examples: '0 8 1 * *' = 1st of month at 8AM
-  //           '0 8 * * 1' = every Monday at 8AM
-  schedule: "0 6 8 * *",
+  // Example: '30 0 * * 1' = every Monday at 00:30 UTC (06:00 IST)
+  schedule: process.env.SEO_AUDIT_SCHEDULE || "30 0 * * 1",
 };
 // ╚══════════════════════════════════════════════════════════╝
 
@@ -79,8 +255,9 @@ const CONFIG = {
 
 const MEDIA_EXT = new Set([
   ".jpg",".jpeg",".png",".gif",".svg",".webp",".ico",".bmp",
-  ".mp4",".avi",".mov",".mp3",".wav",".pdf",
-  ".zip",".tar",".gz",".exe",".css",".js",".woff",".woff2",".ttf",
+  ".mp4",".avi",".mov",".webm",".ogg",".ogv",".mp3",".wav",".m4a",
+  ".pdf",".zip",".tar",".gz",".7z",".rar",".exe",
+  ".css",".js",".woff",".woff2",".ttf",".eot",".otf",".map",
 ]);
 
 function normalizeUrl(raw) {
@@ -100,7 +277,9 @@ function shouldCrawl(urlStr, baseDomain) {
     const u = new URL(urlStr);
     if (!["http:","https:"].includes(u.protocol)) return false;
     if (u.hostname !== baseDomain && !u.hostname.endsWith("." + baseDomain)) return false;
-    if (MEDIA_EXT.has(path.extname(u.pathname).toLowerCase())) return false;
+    const pathname = u.pathname.split("?")[0].split("#")[0];
+    const ext = path.extname(pathname).toLowerCase();
+    if (MEDIA_EXT.has(ext)) return false;
     return true;
   } catch { return false; }
 }
@@ -224,6 +403,7 @@ async function crawlAllUrls(startUrl, browser) {
       for (const href of hrefs) {
         const norm = normalizeUrl(href);
         if (norm && shouldCrawl(norm, baseDomain) && !visited.has(norm) && !queue.includes(norm)) {
+          if (found.size >= CONFIG.crawlMaxUrls) break;
           found.add(norm);
           queue.push(norm);
         }
@@ -232,9 +412,9 @@ async function crawlAllUrls(startUrl, browser) {
     finally { await page.close(); }
   }
 
-  while (queue.length > 0) {
+  while (queue.length > 0 && visited.size < CONFIG.crawlMaxUrls) {
     const batch = [];
-    while (queue.length > 0 && batch.length < CONFIG.crawlConcurrency) {
+    while (queue.length > 0 && batch.length < CONFIG.crawlConcurrency && visited.size + batch.length < CONFIG.crawlMaxUrls) {
       const next = queue.shift();
       if (next && !visited.has(next)) batch.push(next);
     }
@@ -257,7 +437,8 @@ async function crawlAllUrls(startUrl, browser) {
  */
 function getStatusAndFinalUrlWithRedirectType(inputUrl, returnHeaders = false) {
   return new Promise((resolve) => {
-    const doRequest = (url, method, redirectCount, chain) => {
+    const doRequest = (url, method, redirectCount, chain = []) => {
+      chain = Array.isArray(chain) ? chain : [];
       if (redirectCount > 10) return resolve({ status: -1, finalUrl: url, redirected: true, redirectType: "Limit exceeded", originalUrl: inputUrl, headers: {}, chain });
       try {
         const parsed = new URL(url);
@@ -281,7 +462,7 @@ function getStatusAndFinalUrlWithRedirectType(inputUrl, returnHeaders = false) {
               return doRequest(next, method, redirectCount + 1, newChain);
             }
             if ((status === 403 || status === 405) && method === "HEAD") {
-              return doRequest(url, "GET", redirectCount);
+              return doRequest(url, "GET", redirectCount, chain);
             }
             
             const redirectType = chain.length > 0 ? chain.map(c => c.type).join(" → ") : null;
@@ -326,7 +507,16 @@ async function fetchSeoDetails(urls, browser, bypassHttpCheck = false) {
     } else {
       ({ status, finalUrl, redirected, redirectType } = await getStatusAndFinalUrlWithRedirectType(url));
       if (status !== 200) {
-        results.push({ seedUrl: url, isRedirected: redirected ? "Yes" : "No", redirectType: redirectType || "", finalUrl, finalStatus: status, ga4Present: "Not Checked" });
+        results.push({
+          seedUrl: url,
+          isRedirected: redirected ? "Yes" : "No",
+          redirectType: redirectType || "",
+          finalUrl,
+          finalStatus: status,
+          ga4Present: "Not Checked",
+          gtmPresent: "Not Checked",
+          facebookPixelPresent: "Not Checked",
+        });
         continue;
       }
     }
@@ -338,49 +528,111 @@ async function fetchSeoDetails(urls, browser, bypassHttpCheck = false) {
       const res  = await page.goto(finalUrl, { timeout: 30000, waitUntil: bypassHttpCheck ? "networkidle" : "domcontentloaded" });
       if (bypassHttpCheck) { await page.waitForTimeout(2000); row.finalStatus = res?.status() ?? -1; }
 
-      // ── GA4 Detection ─────────────────────────────────────────────────────
-      const ga4Data = await page.evaluate(() => {
+      // ── Analytics / Tracking Detection ───────────────────────────────────
+      // Give deferred / window.onload-injected tags (a common pattern for a
+      // *second* GTM container or a gtag script created via createElement on
+      // 'load') a brief window to execute before we inspect the page.
+      if (!bypassHttpCheck) {
+        await page.waitForTimeout(1500).catch(() => {});
+      }
+
+      const trackingData = await page.evaluate(() => {
+        const ga4Ids    = new Set();
+        const gtmIds    = new Set();
+        const fbPixelIds = new Set();
         let ga4PropertyId = null;
-        let ga4MeasurementId = null;
-        
-        // Check for GA4 via window.gtag.config
-        if (window.gtag) {
-          try {
-            // Try to extract GA4 IDs from window.dataLayer
-            if (window.dataLayer && Array.isArray(window.dataLayer)) {
-              for (const event of window.dataLayer) {
-                if (event['measurement_id']) ga4MeasurementId = event['measurement_id'];
-                if (event['config']) {
-                  Object.keys(event.config).forEach(key => {
-                    if (key.startsWith('G-')) ga4MeasurementId = key;
-                  });
-                }
+
+        // 1) GA4 measurement IDs surfaced via dataLayer config calls that have
+        //    actually fired by the time we inspect the page.
+        try {
+          if (window.dataLayer && Array.isArray(window.dataLayer)) {
+            for (const event of window.dataLayer) {
+              if (event && event['measurement_id']) ga4Ids.add(event['measurement_id']);
+              if (event && event['config']) {
+                Object.keys(event.config).forEach(key => {
+                  if (key.startsWith('G-')) ga4Ids.add(key);
+                });
               }
             }
-          } catch (e) { }
-        }
-        
-        // Check script tags for GA4
-        const scripts = Array.from(document.querySelectorAll('script')).map(s => s.innerHTML || s.src);
+          }
+        } catch (e) { /* ignore */ }
+
+        // 2) Runtime GTM containers that have actually loaded — this catches
+        //    containers injected on window 'load' (not just inline at parse time),
+        //    including sites that run more than one GTM container simultaneously.
+        try {
+          if (window.google_tag_manager) {
+            Object.keys(window.google_tag_manager).forEach(key => {
+              if (/^GTM-/i.test(key)) gtmIds.add(key.toUpperCase());
+            });
+          }
+        } catch (e) { /* ignore */ }
+
+        // 3) Runtime Facebook Pixel IDs (if fbq has initialised by now)
+        try {
+          const fbInstance = window.fbq || window._fbq;
+          if (fbInstance && typeof fbInstance.getState === "function") {
+            const state = fbInstance.getState();
+            if (state && Array.isArray(state.pixels)) {
+              state.pixels.forEach(p => { if (p && p.id) fbPixelIds.add(String(p.id)); });
+            }
+          }
+        } catch (e) { /* ignore */ }
+
+        // 4) Scan every <script> tag (inline body + src) for literal IDs.
+        //    This still works even if a script hasn't executed yet, because we
+        //    are only pattern-matching source text, not requiring execution —
+        //    it also multi-matches, so more than one GTM/GA4 ID on a page is
+        //    captured rather than only the last one seen.
+        const scripts = Array.from(document.querySelectorAll('script')).map(s => `${s.innerHTML || ''}\n${s.src || ''}`);
+        const allScriptText = scripts.join('\n');
+
         for (const script of scripts) {
-          const match = script.match(/G-[A-Z0-9]{8,10}/);
-          if (match) ga4MeasurementId = match[0];
+          const ga4Matches = script.match(/G-[A-Z0-9]{8,10}/g) || [];
+          ga4Matches.forEach(m => ga4Ids.add(m));
+
+          const gtmMatches = script.match(/GTM-[A-Z0-9]+/ig) || [];
+          gtmMatches.forEach(m => gtmIds.add(m.toUpperCase()));
+
+          const fbPixelMatches = [...script.matchAll(/fbq\(\s*['"]init['"]\s*,\s*['"](\d+)['"]/ig)];
+          fbPixelMatches.forEach(m => { if (m[1]) fbPixelIds.add(m[1]); });
         }
-        
-        // Check meta tags
+
+        // 5) Fallback: Facebook Pixel <noscript> tracking pixel
+        //    <img src="https://www.facebook.com/tr?id=XXXXXXXXXX&ev=PageView...">
+        try {
+          document.querySelectorAll('noscript').forEach(ns => {
+            const match = ns.innerHTML.match(/facebook\.com\/tr\?id=(\d+)/i);
+            if (match && match[1]) fbPixelIds.add(match[1]);
+          });
+        } catch (e) { /* ignore */ }
+
+        // Check meta tags / attributes for a GA4 property id
         const meta = document.querySelector('meta[property="google-analytics"]');
         if (meta) ga4PropertyId = meta.getAttribute('content');
-        
+
+        const ga4Present         = ga4Ids.size > 0 || scripts.some(s => s.includes('gtag'));
+        const gtmPresent         = gtmIds.size > 0;
+        const facebookPixelPresent = fbPixelIds.size > 0;
+
         return {
-          isPresent: !!(ga4MeasurementId || scripts.some(s => s.includes('gtag'))),
-          measurementId: ga4MeasurementId || "Not Found",
+          ga4Present,
+          measurementId: ga4Ids.size ? [...ga4Ids].join(', ') : "Not Found",
           propertyId: ga4PropertyId || "Not Found",
+          gtmPresent,
+          gtmId: gtmIds.size ? [...gtmIds].join(', ') : "Not Found",
+          facebookPixelPresent,
+          facebookPixelId: fbPixelIds.size ? [...fbPixelIds].join(', ') : "Not Found",
         };
       });
 
-      row.ga4Present = ga4Data.isPresent ? "Yes" : "No";
-      row.ga4MeasurementId = ga4Data.measurementId;
-      row.ga4PropertyId = ga4Data.propertyId;
+      row.ga4Present = trackingData.ga4Present ? "Yes" : "No";
+      row.ga4MeasurementId = trackingData.measurementId;
+      row.ga4PropertyId = trackingData.propertyId;
+      row.gtmPresent = trackingData.gtmPresent ? "Yes" : "No";
+      row.gtmId = trackingData.gtmId;
+      row.facebookPixelPresent = trackingData.facebookPixelPresent ? "Yes" : "No";
+      row.facebookPixelId = trackingData.facebookPixelId;
 
       row.metaTitle    = await page.$eval("head > title", el => el.innerText.trim()).catch(() => "Not Found");
       row.metaTitleLen = row.metaTitle !== "Not Found" ? row.metaTitle.length : 0;
@@ -417,6 +669,10 @@ async function fetchSeoDetails(urls, browser, bypassHttpCheck = false) {
       row.ga4Present = "Error";
       row.ga4MeasurementId = "";
       row.ga4PropertyId = "";
+      row.gtmPresent = "Error";
+      row.gtmId = "";
+      row.facebookPixelPresent = "Error";
+      row.facebookPixelId = "";
     } finally {
       await page.close();
     }
@@ -438,19 +694,35 @@ async function fetchAltTags(urls, baseDomain, browser) {
 
   for (let i = 0; i < urls.length; i++) {
     const url = urls[i];
-    if (!url.includes(baseDomain)) continue;
     process.stdout.write(`\r  [Alt] ${i + 1}/${urls.length}: ${url.slice(0, 70)}   `);
 
     const page = await context.newPage();
     try {
       await page.goto(url, { timeout: 30000, waitUntil: "domcontentloaded" });
+      await page.evaluate(() => {
+        document.querySelectorAll("img").forEach(img => img.scrollIntoView({ block: "center" }));
+      });
+      await page.waitForTimeout(1500);
       const images = await page.$$eval("img", imgs =>
-        imgs.map(img => ({
-          src : img.getAttribute("src") ?? "",
-          alt : img.getAttribute("alt"),
-          width : img.naturalWidth,
-          height: img.naturalHeight,
-        }))
+        imgs.map(img => {
+          const resolveUrl = value => {
+            try { return value ? new URL(value, document.baseURI).href : ""; } catch { return ""; }
+          };
+          const candidates = [
+            img.getAttribute("data-src"),
+            img.getAttribute("data-lazy-src"),
+            img.getAttribute("data-original"),
+            img.currentSrc,
+            img.src,
+          ].map(resolveUrl).filter(Boolean);
+          const realSrc = candidates.find(src => !/(?:^|\/)empty\.webp(?:[?#]|$)/i.test(src)) ?? "";
+          return {
+            src: realSrc,
+            alt: img.getAttribute("alt"),
+            width: img.naturalWidth,
+            height: img.naturalHeight,
+          };
+        })
       );
 
       const MEDIA_RE = /\.(jpg|jpeg|png|gif|svg|bmp|ico|mp4|avi|mpeg|mpg|mov|flv|wmv|webm|webp|ogg|mp3|wav|flac|aac|wma|pdf)$/i;
@@ -1025,10 +1297,14 @@ async function buildExcel(siteName, crawlData, seoData, altData, linkData, aiDat
     { header: "Redirect Type",       key: "redirectType",     width: 25 },
     { header: "Final URL",           key: "finalUrl",         width: 55 },
     { header: "Final Status Code",   key: "finalStatus",      width: 16 },
-    // ── GA4 Analytics ──
-    { header: "GA4 Present?",        key: "ga4Present",       width: 14 },
-    { header: "GA4 Measurement ID",  key: "ga4MeasurementId", width: 25 },
-    { header: "GA4 Property ID",     key: "ga4PropertyId",    width: 25 },
+    // ── GA4 / GTM / Pixel Analytics ──
+    { header: "GA4 Present?",          key: "ga4Present",           width: 14 },
+    { header: "GA4 Measurement ID",    key: "ga4MeasurementId",     width: 25 },
+    { header: "GA4 Property ID",       key: "ga4PropertyId",        width: 25 },
+    { header: "GTM Present?",          key: "gtmPresent",           width: 14 },
+    { header: "GTM ID",                key: "gtmId",                width: 20 },
+    { header: "Facebook Pixel Present?", key: "facebookPixelPresent", width: 20 },
+    { header: "Facebook Pixel ID",     key: "facebookPixelId",      width: 22 },
     // ── SEO metadata ──
     { header: "Meta Title",          key: "metaTitle",        width: 50 },
     { header: "Title Length",        key: "metaTitleLen",     width: 13 },
@@ -1060,6 +1336,10 @@ async function buildExcel(siteName, crawlData, seoData, altData, linkData, aiDat
       ga4Present: d.ga4Present ?? "Not Checked",
       ga4MeasurementId: d.ga4MeasurementId ?? "",
       ga4PropertyId: d.ga4PropertyId ?? "",
+      gtmPresent: d.gtmPresent ?? "Not Checked",
+      gtmId: d.gtmId ?? "",
+      facebookPixelPresent: d.facebookPixelPresent ?? "Not Checked",
+      facebookPixelId: d.facebookPixelId ?? "",
       metaTitle: d.metaTitle ?? "", metaTitleLen: d.metaTitleLen ?? "",
       metaDesc: d.metaDesc ?? "", metaDescLen: d.metaDescLen ?? "",
       canonical: d.canonical ?? "", h1: d.h1 ?? "", h1Count: d.h1Count ?? "",
@@ -1097,12 +1377,26 @@ async function buildExcel(siteName, crawlData, seoData, altData, linkData, aiDat
       statusCell.font = { name: "Arial", size: 10, color: { argb: "FF9C0006" }, bold: true };
     }
     
-    // Colour-code GA4 status
+    // Colour-code GA4 / GTM / Pixel status
     const ga4Cell = r.getCell("ga4Present");
     if (d.ga4Present === "Yes") {
       ga4Cell.font = { name: "Arial", size: 10, color: { argb: "FF1E7145" }, bold: true };
     } else if (d.ga4Present === "No") {
       ga4Cell.font = { name: "Arial", size: 10, color: { argb: "FF9C0006" }, bold: true };
+    }
+
+    const gtmCell = r.getCell("gtmPresent");
+    if (d.gtmPresent === "Yes") {
+      gtmCell.font = { name: "Arial", size: 10, color: { argb: "FF1E7145" }, bold: true };
+    } else if (d.gtmPresent === "No") {
+      gtmCell.font = { name: "Arial", size: 10, color: { argb: "FF9C0006" }, bold: true };
+    }
+
+    const pixelCell = r.getCell("facebookPixelPresent");
+    if (d.facebookPixelPresent === "Yes") {
+      pixelCell.font = { name: "Arial", size: 10, color: { argb: "FF1E7145" }, bold: true };
+    } else if (d.facebookPixelPresent === "No") {
+      pixelCell.font = { name: "Arial", size: 10, color: { argb: "FF9C0006" }, bold: true };
     }
     
     r.getCell("h1").alignment = { vertical: "middle", wrapText: true };
@@ -1357,15 +1651,279 @@ async function buildExcel(siteName, crawlData, seoData, altData, linkData, aiDat
   return { wb, aiSummary: { avgAiScore, goodPages, criticalPages, aiBlocked, aiJsDependent, aiThin, aiCloaking, aiOrphan, total: aiData.length } };
 }
 
+function findPreviousReport(siteName, currentReportPath) {
+  const prefix = `SEO_Audit_${siteName}_`;
+  const currentPath = path.resolve(currentReportPath);
+  const candidates = fs.readdirSync(__dirname)
+    .filter(file => file.startsWith(prefix) && file.endsWith(".xlsx") &&
+      path.resolve(__dirname, file) !== currentPath)
+    .sort((a, b) => b.localeCompare(a));
+  return candidates.length ? path.join(__dirname, candidates[0]) : null;
+}
+
+function displayCellValue(cell) {
+  const value = cell?.value;
+  if (value === null || value === undefined) return "";
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "object") return String(value.text ?? value.hyperlink ?? value.result ?? JSON.stringify(value));
+  return String(value);
+}
+
+function readSummaryMetrics(workbook) {
+  const sheet = workbook.getWorksheet("Summary");
+  const metrics = new Map();
+  if (!sheet) return metrics;
+  for (let rowNumber = 1; rowNumber <= sheet.rowCount; rowNumber++) {
+    const row = sheet.getRow(rowNumber);
+    const label = displayCellValue(row.getCell(1));
+    const value = displayCellValue(row.getCell(2));
+    if (label && value) metrics.set(label, value);
+  }
+  return metrics;
+}
+
+function readReportRecords(workbook, sheetName, keyHeaders) {
+  const sheet = workbook.getWorksheet(sheetName);
+  const records = new Map();
+  if (!sheet || sheet.rowCount < 2) return records;
+
+  const headers = Array.from({ length: sheet.columnCount }, (_, index) =>
+    displayCellValue(sheet.getRow(1).getCell(index + 1)));
+  const keyColumns = keyHeaders.map(header => headers.indexOf(header) + 1);
+  if (keyColumns.some(column => column === 0)) return records;
+
+  const occurrences = new Map();
+  for (let rowNumber = 2; rowNumber <= sheet.rowCount; rowNumber++) {
+    const row = sheet.getRow(rowNumber);
+    const identity = keyColumns.map(column => displayCellValue(row.getCell(column)));
+    if (identity.every(value => !value)) continue;
+
+    const baseKey = JSON.stringify(identity);
+    const occurrence = (occurrences.get(baseKey) ?? 0) + 1;
+    occurrences.set(baseKey, occurrence);
+    const values = new Map(headers.map((header, index) =>
+      [header, displayCellValue(row.getCell(index + 1))]));
+    records.set(`${baseKey}#${occurrence}`, { identity, values });
+  }
+  return records;
+}
+
+function parseMetricNumber(value) {
+  const match = String(value).match(/^(-?\d+(?:\.\d+)?)(?:\/\d+)?$/);
+  return match ? Number(match[1]) : null;
+}
+
+function styleComparisonDataRow(row, index, statusColumn) {
+  styleDataRow(row, index);
+  row.eachCell(cell => {
+    cell.alignment = { vertical: "middle", wrapText: true };
+  });
+  const statusColors = {
+    Added: "FF1E7145",
+    Removed: "FF9C0006",
+    Updated: "FF9C6500",
+    Unchanged: "FF666666",
+  };
+  const statusCell = row.getCell(statusColumn);
+  const color = statusColors[statusCell.value];
+  if (color) statusCell.font = { name: "Arial", size: 10, bold: true, color: { argb: color } };
+}
+
+async function buildComparisonReport(siteName, previousReportPath, currentReportPath, currentWorkbook) {
+  const previousWorkbook = new ExcelJS.Workbook();
+  await previousWorkbook.xlsx.readFile(previousReportPath);
+
+  const recordSheets = [
+    { name: "Sheet1 - All URLs", keys: ["URL"] },
+    { name: "Sheet2 - SEO Data", keys: ["Seed URL"] },
+    { name: "Sheet3 - Alt Tags", keys: ["Page URL", "Image URL"] },
+    { name: "Sheet4 - Links", keys: ["Found On", "Link URL"] },
+    { name: "Sheet5 - AI Visibility", keys: ["URL"] },
+  ];
+  const datasetComparisons = [];
+  const recordChanges = [];
+  const fieldChanges = [];
+
+  for (const { name, keys } of recordSheets) {
+    const previousRecords = readReportRecords(previousWorkbook, name, keys);
+    const currentRecords = readReportRecords(currentWorkbook, name, keys);
+    const counts = { Added: 0, Removed: 0, Updated: 0, Unchanged: 0 };
+    const recordIds = new Set([...previousRecords.keys(), ...currentRecords.keys()]);
+
+    for (const recordId of recordIds) {
+      const previous = previousRecords.get(recordId);
+      const current = currentRecords.get(recordId);
+      const record = current ?? previous;
+      const fields = new Set([
+        ...(previous?.values.keys() ?? []),
+        ...(current?.values.keys() ?? []),
+      ]);
+      let status;
+      let changes = [];
+
+      if (!previous) {
+        status = "Added";
+      } else if (!current) {
+        status = "Removed";
+      } else {
+        changes = [...fields]
+          .filter(field => field && field !== "#")
+          .map(field => ({
+            field,
+            previous: previous.values.get(field) ?? "",
+            current: current.values.get(field) ?? "",
+          }))
+          .filter(change => change.previous !== change.current);
+        status = changes.length ? "Updated" : "Unchanged";
+      }
+
+      counts[status]++;
+      if (status === "Unchanged") continue;
+
+      const identity = record.identity.join(" | ");
+      const changedFields = status === "Updated"
+        ? changes
+        : [...fields]
+          .filter(field => field && field !== "#")
+          .map(field => ({
+            field,
+            previous: previous?.values.get(field) ?? "",
+            current: current?.values.get(field) ?? "",
+          }));
+
+      recordChanges.push({ section: name, status, identity, fieldsChanged: changedFields.length });
+      for (const change of changedFields) {
+        fieldChanges.push({ section: name, status, identity, ...change });
+      }
+    }
+
+    datasetComparisons.push({
+      section: name,
+      previousCount: previousRecords.size,
+      currentCount: currentRecords.size,
+      ...counts,
+      fieldsChanged: fieldChanges.filter(change => change.section === name).length,
+    });
+  }
+
+  const comparisonWorkbook = new ExcelJS.Workbook();
+  comparisonWorkbook.creator = "SEO-Audit-Tool";
+  comparisonWorkbook.created = new Date();
+
+  const summarySheet = comparisonWorkbook.addWorksheet("Summary Changes");
+  summarySheet.columns = [
+    { key: "metric", width: 38 },
+    { key: "previous", width: 42 },
+    { key: "current", width: 42 },
+    { key: "change", width: 16 },
+    { key: "status", width: 16 },
+    { key: "added", width: 12 },
+    { key: "removed", width: 12 },
+    { key: "updated", width: 12 },
+    { key: "unchanged", width: 14 },
+    { key: "fieldChanges", width: 16 },
+  ];
+  summarySheet.mergeCells("A1:J1");
+  summarySheet.getCell("A1").value = `Audit Comparison Summary: ${siteName}`;
+  summarySheet.getCell("A1").font = { bold: true, size: 15, name: "Arial", color: { argb: "FF1F3864" } };
+  summarySheet.getCell("A1").fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9E1F2" } };
+  summarySheet.getCell("A1").alignment = { vertical: "middle" };
+  summarySheet.getRow(1).height = 30;
+  summarySheet.addRow(["Previous report", path.basename(previousReportPath)]);
+  summarySheet.addRow(["Current report", path.basename(currentReportPath)]);
+  summarySheet.addRow([]);
+  summarySheet.addRow(["Summary metric", "Previous run", "Current run", "Numeric delta", "Status"]);
+  styleHeader(summarySheet.getRow(5), "FF1F3864");
+
+  const previousMetrics = readSummaryMetrics(previousWorkbook);
+  const currentMetrics = readSummaryMetrics(currentWorkbook);
+  const metricNames = [...new Set([...previousMetrics.keys(), ...currentMetrics.keys()])];
+  for (const metric of metricNames) {
+    const previous = previousMetrics.get(metric) ?? "";
+    const current = currentMetrics.get(metric) ?? "";
+    const previousNumber = parseMetricNumber(previous);
+    const currentNumber = parseMetricNumber(current);
+    const delta = previousNumber !== null && currentNumber !== null
+      ? currentNumber - previousNumber
+      : "";
+    const status = !previous && current ? "Added"
+      : previous && !current ? "Removed"
+      : previous === current ? "Unchanged"
+      : "Updated";
+    summarySheet.addRow([metric, previous, current, delta, status]);
+  }
+
+  for (let rowNumber = 5; rowNumber <= summarySheet.rowCount; rowNumber++) {
+    const row = summarySheet.getRow(rowNumber);
+    styleComparisonDataRow(row, rowNumber, 5);
+  }
+
+  summarySheet.addRow([]);
+  const datasetHeaderRow = summarySheet.rowCount + 1;
+  summarySheet.addRow(["Dataset", "Previous records", "Current records", "Added", "Removed", "Updated", "Unchanged", "Field changes"]);
+  styleHeader(summarySheet.getRow(datasetHeaderRow), "FF375623");
+  for (const dataset of datasetComparisons) {
+    const row = summarySheet.addRow([
+      dataset.section,
+      dataset.previousCount,
+      dataset.currentCount,
+      dataset.Added,
+      dataset.Removed,
+      dataset.Updated,
+      dataset.Unchanged,
+      dataset.fieldsChanged,
+    ]);
+    styleDataRow(row, row.number);
+  }
+  summarySheet.views = [{ state: "frozen", ySplit: 5 }];
+  summarySheet.autoFilter = { from: { row: 5, column: 1 }, to: { row: 5, column: 5 } };
+
+  const recordsSheet = comparisonWorkbook.addWorksheet("Record Changes");
+  recordsSheet.columns = [
+    { header: "Report Section", key: "section", width: 28 },
+    { header: "Change Type", key: "status", width: 16 },
+    { header: "URL / Item", key: "identity", width: 82 },
+    { header: "Fields Changed", key: "fieldsChanged", width: 16 },
+  ];
+  styleHeader(recordsSheet.getRow(1), "FF1F3864");
+  for (const change of recordChanges) recordsSheet.addRow(change);
+  for (let rowNumber = 2; rowNumber <= recordsSheet.rowCount; rowNumber++) {
+    styleComparisonDataRow(recordsSheet.getRow(rowNumber), rowNumber, 2);
+  }
+  freezeAndFilter(recordsSheet, 4);
+
+  const changesSheet = comparisonWorkbook.addWorksheet("Field Changes");
+  changesSheet.columns = [
+    { header: "Report Section", key: "section", width: 28 },
+    { header: "Change Type", key: "status", width: 16 },
+    { header: "URL / Item", key: "identity", width: 68 },
+    { header: "Field", key: "field", width: 28 },
+    { header: "Previous", key: "previous", width: 55 },
+    { header: "Current", key: "current", width: 55 },
+  ];
+  styleHeader(changesSheet.getRow(1), "FF375623");
+  for (const change of fieldChanges) changesSheet.addRow(change);
+  for (let rowNumber = 2; rowNumber <= changesSheet.rowCount; rowNumber++) {
+    styleComparisonDataRow(changesSheet.getRow(rowNumber), rowNumber, 2);
+  }
+  freezeAndFilter(changesSheet, 6);
+
+  return comparisonWorkbook;
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 //  MAIN — Runs all steps for each website
 // ══════════════════════════════════════════════════════════════════════════════
 async function runAudit() {
   const onlyStep = process.argv.find(a => a.startsWith("--only="))?.split("=")[1];
-  const runSeo   = !onlyStep || onlyStep === "seo";
+  const validSteps = new Set(["crawl", "seo", "alt", "links", "ai"]);
+  if (onlyStep && !validSteps.has(onlyStep)) {
+    throw new Error(`Unknown audit step "${onlyStep}". Use: crawl, seo, alt, links, or ai.`);
+  }
+  const runSeo   = !onlyStep || onlyStep === "seo" || onlyStep === "ai";
   const runAlt   = !onlyStep || onlyStep === "alt";
-  const runLinks = !onlyStep || onlyStep === "links";
-  const runAi    = !onlyStep;
+  const runLinks = !onlyStep || onlyStep === "links" || onlyStep === "ai";
+  const runAi    = !onlyStep || onlyStep === "ai";
 
   console.log("\n╔══════════════════════════════════════════╗");
   console.log("║       SEO AUDIT TOOL — Starting          ║");
@@ -1373,54 +1931,103 @@ async function runAudit() {
   if (onlyStep) console.log(`║  Mode: --only=${onlyStep.padEnd(27)}║`);
   console.log("╚══════════════════════════════════════════╝\n");
 
+  const sitesToAudit = CONFIG.websites;
+  const total = sitesToAudit.length;
+
+  // Print initial queue status
+  console.log("  📋  Audit Queue:");
+  sitesToAudit.forEach((s, i) => console.log(`       ${i + 1}. ${s.url}  [Waiting]`));
+  console.log("");
+
   const browser     = await chromium.launch({ headless: true });
   const attachments = [];
   const allSiteSummaries = [];
+  const auditResults = sitesToAudit.map(s => ({ url: s.url, status: "Waiting" }));
 
-  for (const site of CONFIG.websites) {
-    const siteUrl    = site.url;
-    const bypass     = site.bypassHttpCheck ?? false;
-    const siteName   = new URL(siteUrl).hostname;
-    const timestamp  = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  for (let siteIdx = 0; siteIdx < sitesToAudit.length; siteIdx++) {
+    const site    = sitesToAudit[siteIdx];
+    const siteUrl = site.url;
+    const bypass  = site.bypassHttpCheck ?? false;
+    const siteName  = new URL(siteUrl).hostname;
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     const outputFile = `SEO_Audit_${siteName}_${timestamp}.xlsx`;
 
-    console.log(`\n${"═".repeat(55)}`);
-    console.log(`  🌐  Site: ${siteUrl}`);
-    console.log(`  🔒  Bypass HTTP Check: ${bypass ? "Yes (Cloudflare mode)" : "No (Fast mode)"}`);
-    console.log(`${"═".repeat(55)}\n`);
+    auditResults[siteIdx].status = "Auditing";
 
-    console.log("  📡  STEP 1 — Crawling all URLs...");
-    const crawlData = await crawlAllUrls(siteUrl, browser);
+    console.log(`\n${"═".repeat(60)}`);
+    console.log(`  🌐  Website ${siteIdx + 1}/${total}: ${siteUrl}`);
+    console.log(`  🔒  Bypass HTTP Check: ${bypass ? "Yes (Cloudflare mode)" : "No (Fast mode)"}`);
+    console.log(`  📊  Status: Auditing`);
+    console.log(`${"═".repeat(60)}\n`);
+
+    let crawlData;
+    try {
+      console.log("  📡  STEP 1 — Discovering URLs (sitemap / crawl)...");
+      crawlData = await discoverUrls(siteUrl, browser);
+      console.log(`  ℹ️   Discovery method: ${crawlData.discoveryMethod} | URLs found: ${crawlData.urls.length}`);
+    } catch (err) {
+      console.error(`  ❌  URL discovery failed for ${siteUrl}: ${err.message}`);
+      auditResults[siteIdx].status = `Failed — ${err.message}`;
+      continue;
+    }
 
     let seoData = [], altData = [], linkData = [], aiData = [];
 
-    if (runSeo) {
-      console.log("\n  🔍  STEP 2 — Fetching SEO details...");
-      seoData = await fetchSeoDetails(crawlData.urls, browser, bypass);
-    } else { console.log("\n  ⏭️   STEP 2 — Skipped"); }
+    try {
+      if (runSeo) {
+        console.log("\n  🔍  STEP 2 — Fetching SEO details...");
+        seoData = await fetchSeoDetails(crawlData.urls, browser, bypass);
+      } else { console.log("\n  ⏭️   STEP 2 — Skipped"); }
 
-    if (runAlt) {
-      console.log("\n  🖼️   STEP 3 — Auditing image alt tags...");
-      altData = await fetchAltTags(crawlData.urls, crawlData.baseDomain, browser);
-    } else { console.log("\n  ⏭️   STEP 3 — Skipped"); }
+      if (runAlt) {
+        console.log("\n  🖼️   STEP 3 — Auditing image alt tags...");
+        altData = await fetchAltTags(crawlData.urls, crawlData.baseDomain, browser);
+      } else { console.log("\n  ⏭️   STEP 3 — Skipped"); }
 
-    if (runLinks) {
-      console.log("\n  🔗  STEP 4 — Collecting internal/external links...");
-      linkData = await collectLinks(crawlData.urls, crawlData.baseDomain, browser);
-    } else { console.log("\n  ⏭️   STEP 4 — Skipped"); }
+      if (runLinks) {
+        console.log("\n  🔗  STEP 4 — Collecting internal/external links...");
+        linkData = await collectLinks(crawlData.urls, crawlData.baseDomain, browser);
+      } else { console.log("\n  ⏭️   STEP 4 — Skipped"); }
 
-    if (runAi) {
-      aiData = await runAiVisibilityAudit(siteUrl, crawlData, seoData, linkData, browser);
-    } else { console.log("\n  ⏭️   STEP 5 — Skipped"); }
+      if (runAi) {
+        aiData = await runAiVisibilityAudit(siteUrl, crawlData, seoData, linkData, browser);
+      } else { console.log("\n  ⏭️   STEP 5 — Skipped"); }
 
-    console.log("\n  💾  Building Excel report...");
-    const { wb, aiSummary } = await buildExcel(siteName, crawlData, seoData, altData, linkData, aiData);
-    await wb.xlsx.writeFile(outputFile);
-    console.log(`  📊  Saved → ${outputFile}`);
+      console.log("\n  💾  Building Excel report...");
+      const { wb, aiSummary } = await buildExcel(siteName, crawlData, seoData, altData, linkData, aiData);
+      const previousReportPath = findPreviousReport(siteName, outputFile);
+      await wb.xlsx.writeFile(outputFile);
+      console.log(`  📊  Saved → ${outputFile}`);
 
-    attachments.push({ filename: path.basename(outputFile), path: outputFile, siteName });
-    allSiteSummaries.push({ siteName, siteUrl, aiSummary, crawlCount: crawlData.urls.length });
-    console.log(`\n  ✅  ${siteName} — COMPLETE!\n`);
+      attachments.push({ filename: path.basename(outputFile), path: outputFile, siteName });
+      if (previousReportPath) {
+        const comparisonFile = path.join(path.dirname(outputFile), `SEO_Comparison_${siteName}_${timestamp}.xlsx`);
+        try {
+          const comparisonWorkbook = await buildComparisonReport(siteName, previousReportPath, outputFile, wb);
+          await comparisonWorkbook.xlsx.writeFile(comparisonFile);
+          console.log(`  📊  Comparison report saved → ${comparisonFile}`);
+          attachments.push({ filename: path.basename(comparisonFile), path: comparisonFile, siteName });
+        } catch (comparisonError) {
+          console.warn(`  ⚠ Comparison report failed: ${comparisonError.message}`);
+        }
+      } else {
+        console.log(`  ℹ️  No previous report found for ${siteName}; comparison skipped`);
+      }
+      allSiteSummaries.push({ siteName, siteUrl, aiSummary, crawlCount: crawlData.urls.length });
+      auditResults[siteIdx].status = "✓ Completed";
+      console.log(`\n  ✅  ${siteName} — COMPLETE!`);
+    } catch (err) {
+      console.error(`  ❌  Audit failed for ${siteUrl}: ${err.message}`);
+      auditResults[siteIdx].status = `✗ Failed — ${err.message}`;
+    }
+
+    // Print live queue status after each site
+    console.log(`\n  📋  Progress (${siteIdx + 1}/${total} done):`);
+    auditResults.forEach((r, i) => {
+      const icon = r.status.startsWith("✓") ? "✅" : r.status.startsWith("✗") || r.status.startsWith("Failed") ? "❌" : r.status === "Auditing" ? "🔄" : "⏳";
+      console.log(`       ${icon}  ${i + 1}. ${r.url}  [${r.status}]`);
+    });
+    console.log("");
   }
 
   await browser.close();
@@ -1430,9 +2037,16 @@ async function runAudit() {
     await sendCombinedEmail(attachments, allSiteSummaries);
   }
 
+  // Final summary
   console.log("\n╔══════════════════════════════════════════╗");
   console.log("║        ALL AUDITS COMPLETE! 🎉           ║");
-  console.log("╚══════════════════════════════════════════╝\n");
+  console.log("╚══════════════════════════════════════════╝");
+  console.log("\n  Final Results:");
+  auditResults.forEach((r, i) => {
+    const icon = r.status.startsWith("✓") ? "✅" : "❌";
+    console.log(`    ${icon}  ${i + 1}. ${r.url}  →  ${r.status}`);
+  });
+  console.log("");
 
   if (!process.stdin.isTTY) process.exit(0);
 }
